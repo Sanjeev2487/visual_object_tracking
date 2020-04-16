@@ -31,7 +31,7 @@ _logger.addHandler(ch)
 class ADNetRunner:
     MAX_BATCHSIZE = 512
 
-    def __init__(self):
+    def __init__(self, model_path):
         self.tensor_input = tf.placeholder(tf.float32, shape=(None, 112, 112, 3), name='patch')
         self.tensor_action_history = tf.placeholder(tf.float32, shape=(None, 1, 1, 110), name='action_history')
         self.tensor_lb_action = tf.placeholder(tf.int32, shape=(None, ), name='lb_action')
@@ -43,13 +43,17 @@ class ADNetRunner:
             inter_op_parallelism_threads=1,
             intra_op_parallelism_threads=1
         ))
-
+        self.model_path = model_path
         self.adnet = ADNetwork(self.learning_rate_placeholder)
         self.adnet.create_network(self.tensor_input, self.tensor_lb_action, self.tensor_lb_class, self.tensor_action_history, self.tensor_is_training)
-        if 'ADNET_MODEL_PATH' in os.environ.keys():
-            self.adnet.read_original_weights(self.persistent_sess, os.environ['ADNET_MODEL_PATH'])
+        if os.path.exists(self.model_path):
+            saver = tf.train.Saver()
+            saver.restore(self.persistent_sess, self.model_path)
         else:
-            self.adnet.read_original_weights(self.persistent_sess)
+            if 'ADNET_MODEL_PATH' in os.environ.keys():
+                self.adnet.read_original_weights(self.persistent_sess, os.environ['ADNET_MODEL_PATH'])
+            else:
+                self.adnet.read_original_weights(self.persistent_sess)
 
         self.action_histories = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
         self.action_histories_old = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
@@ -122,6 +126,8 @@ class ADNetRunner:
             # cv2.imwrite('/Users/ildoonet/Downloads/aaa/%d.jpg' % self.iteration, img)
             # curr_bbox = predicted_box
         self.stopwatch.stop('total')
+
+        self.save_model()
 
         _logger.info('----')
         _logger.info(self.stopwatch)
@@ -353,23 +359,21 @@ class ADNetRunner:
         cv2.imshow('patch', patch)
         return curr_bbox
 
-    def save_model(model_path=''):
-        if cv2.waitKey(0) & 0xFF == ord('q'):
-            break
+    def save_model(self):
         saver = tf.train.Saver()
-        if os.path.exists(model_path):
-            save_path = saver.save(self.persistent_sess, model_path)
+        if os.path.exists(self.model_path):
+            save_path = saver.save(self.persistent_sess, self.model_path)
             print("Saving model at: ", save_path)
         else:
-            print('model path does not exist: ', model_path)
+            print('model path does not exist: ', self.model_path)
 
-    def load_model(model_path=''):
+    def load_model(self):
         saver = tf.train.Saver()
-        if os.path.exists(model_path):
-            save_path = saver.restore(self.persistent_sess, model_path)
-            print("Loading model at: ", model_path)
+        if os.path.exists(self.model_path):
+            saver.restore(self.persistent_sess, self.model_path)
+            print("Loading model at: ", self.model_path)
         else:
-            print('model path does not exist: ', model_path)
+            print('model path does not exist: ', self.model_path)
 
 
     def redetection_by_sampling(self, prev_box, img):
