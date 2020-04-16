@@ -63,6 +63,12 @@ class ADNetRunner:
 
         self.stopwatch = StopWatchManager()
 
+    def get_image_path(self, vid_path, idx):
+        im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
+        if os.path.exists(im_path):
+            return
+        return os.path.join(vid_path, 'img', '%08d.jpg' % (idx + 1))
+
     def by_dataset(self, vid_path='./data/freeman1/'):
         assert os.path.exists(vid_path)
 
@@ -72,7 +78,7 @@ class ADNetRunner:
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
         for idx, gt_box in enumerate(gt_boxes):
-            im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
+            im_path = self.get_image_path(vid_path, idx)
             print('im_path: {}'.format(im_path))
             img = commons.imread(im_path)
             self.imgwh = Coordinate.get_imgwh(img)
@@ -101,7 +107,7 @@ class ADNetRunner:
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
         for idx, gt_box in enumerate(gt_boxes):
-            im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
+            im_path = self.get_image_path(vid_path, idx)
             print('im_path: {}'.format(im_path))
             img = commons.imread(im_path)
             self.imgwh = Coordinate.get_imgwh(img)
@@ -347,6 +353,25 @@ class ADNetRunner:
         cv2.imshow('patch', patch)
         return curr_bbox
 
+    def save_model(model_path=''):
+        if cv2.waitKey(0) & 0xFF == ord('q'):
+            break
+        saver = tf.train.Saver()
+        if os.path.exists(model_path):
+            save_path = saver.save(self.persistent_sess, model_path)
+            print("Saving model at: ", save_path)
+        else:
+            print('model path does not exist: ', model_path)
+
+    def load_model(model_path=''):
+        saver = tf.train.Saver()
+        if os.path.exists(model_path):
+            save_path = saver.restore(self.persistent_sess, model_path)
+            print("Loading model at: ", model_path)
+        else:
+            print('model path does not exist: ', model_path)
+
+
     def redetection_by_sampling(self, prev_box, img):
         """
         default redetection method
@@ -401,4 +426,17 @@ if __name__ == '__main__':
 
     vid_path = args.vid_path
     model = ADNetRunner()
+    model.train(vid_path=vid_path)
+
+
+    model_path = 'model.ckpt'
+    print('Saving the model')
+    # TODO
+    # model.save_model(model_path)
+
+    print('Loading the model')
+    # TODO
+    # model.load_model(model_path)
+
+    print("=====================Running Inference==================")
     model.by_dataset(vid_path=vid_path)
