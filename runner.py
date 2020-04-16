@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import logging
+import argparse
 
 import cv2
 import fire
@@ -71,7 +72,9 @@ class ADNetRunner:
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
         for idx, gt_box in enumerate(gt_boxes):
-            img = commons.imread(os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1)))
+            im_path = os.path.join(vid_path, 'img', '%08d.jpg' % (idx + 1))
+            print('im_path: {}'.format(im_path))
+            img = commons.imread(im_path)
             self.imgwh = Coordinate.get_imgwh(img)
             if idx == 0:
                 # initialization : initial fine-tuning
@@ -349,10 +352,24 @@ class ADNetRunner:
         self.persistent_sess.close()
 
 if __name__ == '__main__':
-    ADNetConf.get('./conf/repo.yaml')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-vid_path", type=str, default='./data/freeman1')
+    args = parser.parse_args()
+
+    current_dir = '.'
+
+    conf_dir = os.path.join(current_dir, 'conf')
+    data_dir = os.path.join(current_dir, 'data')
+    ADNetConf.get(os.path.join(conf_dir, 'repo.yaml'))
 
     random.seed(1258)
     np.random.seed(1258)
     tf.set_random_seed(1258)
 
-    fire.Fire(ADNetRunner)
+    #vid_path= os.path.join(data_dir, 'bicycle')
+    #vid_path= os.path.join(data_dir, 'bicycle')
+    #fire.Fire(ADNetRunner)
+
+    vid_path = args.vid_path
+    model = ADNetRunner()
+    model.by_dataset(vid_path=vid_path)

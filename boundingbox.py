@@ -95,7 +95,11 @@ class BoundingBox:
     @staticmethod
     def read_vid_gt(path):
         if os.path.isdir(path):
-            path = os.path.join(path, 'groundtruth_rect.txt')
+            path1 = os.path.join(path, 'groundtruth_rect.txt')
+            if not os.path.exists(path1):
+                path = os.path.join(path, 'groundtruth.txt')
+            else:
+                path = path1
 
         with open(path, 'r') as f:
             lines = f.readlines()
@@ -104,7 +108,7 @@ class BoundingBox:
         for line in lines:
             if not line.strip():
                 continue
-            x, y, w, h = [int(x) for x in line.split(',')]
+            x, y, w, h = [int(float(x)) for x in line.split(',')]
             box = BoundingBox(x, y, w, h)
             boxes.append(box)
         return boxes
