@@ -7,7 +7,7 @@ import logging
 import argparse
 
 import cv2
-import fire
+#import fire
 import numpy as np
 import tensorflow as tf
 import time
@@ -72,7 +72,7 @@ class ADNetRunner:
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
         for idx, gt_box in enumerate(gt_boxes):
-            im_path = os.path.join(vid_path, 'img', '%08d.jpg' % (idx + 1))
+            im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
             print('im_path: {}'.format(im_path))
             img = commons.imread(im_path)
             self.imgwh = Coordinate.get_imgwh(img)
@@ -86,6 +86,35 @@ class ADNetRunner:
             self.show(img, gt_box=gt_box, predicted_box=predicted_box)
             # cv2.imwrite('/Users/ildoonet/Downloads/aaa/%d.jpg' % self.iteration, img)
             curr_bbox = predicted_box
+        self.stopwatch.stop('total')
+
+        _logger.info('----')
+        _logger.info(self.stopwatch)
+        _logger.info('%.3f FPS' % (len(gt_boxes) / self.stopwatch.get_elapsed('total')))
+
+    def train(self, vid_path='./data/freeman1/'):
+        assert os.path.exists(vid_path)
+
+        gt_boxes = BoundingBox.read_vid_gt(vid_path)
+
+        curr_bbox = None
+        self.stopwatch.start('total')
+        _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
+        for idx, gt_box in enumerate(gt_boxes):
+            im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
+            print('im_path: {}'.format(im_path))
+            img = commons.imread(im_path)
+            self.imgwh = Coordinate.get_imgwh(img)
+            # if idx == 0:
+            # initialization : initial fine-tuning
+            self.initial_finetune(img, gt_box)
+            # curr_bbox = gt_box
+
+            # tracking
+            # predicted_box = self.tracking(img, curr_bbox)
+            # self.show(img, gt_box=gt_box, predicted_box=predicted_box)
+            # cv2.imwrite('/Users/ildoonet/Downloads/aaa/%d.jpg' % self.iteration, img)
+            # curr_bbox = predicted_box
         self.stopwatch.stop('total')
 
         _logger.info('----')
