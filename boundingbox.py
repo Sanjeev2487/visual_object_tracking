@@ -87,6 +87,7 @@ class Coordinate:
         self.y = max(self.y, val)
 
 
+
 class BoundingBox:
     COLOR_GT = (0, 255, 0)
     COLOR_PREDICT = (255, 0, 0)
@@ -108,7 +109,14 @@ class BoundingBox:
         for line in lines:
             if not line.strip():
                 continue
-            x, y, w, h = [int(float(x)) for x in line.split(',')]
+            coordinates = [float(x) for x in line.split(',')]
+            if len(coordinates) == 4:
+                x, y, w, h = [int(x) for x in coordinates]
+            else:
+                x = int(sum([coordinates[i] for i in [0, 2, 4, 6]])/4)
+                y = int(sum([coordinates[i] for i in [1, 3, 5, 7]])/4)
+                w = int(coordinates[2] - coordinates[0])
+                h = int(coordinates[7] - coordinates[1])
             box = BoundingBox(x, y, w, h)
             boxes.append(box)
         return boxes
@@ -181,10 +189,13 @@ class BoundingBox:
         self.xy.x = max(0, self.xy.x)
         self.xy.y = max(0, self.xy.y)
 
+        self.xy.x = min(self.xy.x, imgwh.x)
+        self.xy.y = min(self.xy.y, imgwh.y)
+
         self.wh.x = max(10, min(self.wh.x, imgwh.x - 10))
         self.wh.y = max(10, min(self.wh.y, imgwh.y - 10))
-        self.wh.x = min(self.wh.x, imgwh.x - self.xy.x)
-        self.wh.y = min(self.wh.y, imgwh.y - self.xy.y)
+        self.wh.x = max(10, min(self.wh.x, imgwh.x - self.xy.x))
+        self.wh.y = max(10, min(self.wh.y, imgwh.y - self.xy.y))
 
     def draw(self, img, color=(255, 255, 255)):
         """

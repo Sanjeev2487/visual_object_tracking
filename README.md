@@ -27,8 +27,13 @@ Tensorflow Implementation of 'Action-Decision Networks for Visual Tracking with 
 
 ### OTB100 Dataset
 
+* For Training:
 ```
-$ python runner.py by_dataset  --vid-path=./data/freeman1/
+$ python runner.py -debug 0  -mode train
+```
+* For Testing on one file:
+```
+$ python runner.py -debug 1 -mode test -vid_path data/freeman1
 ```
 
 ## References

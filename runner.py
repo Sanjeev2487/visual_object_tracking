@@ -10,6 +10,8 @@ import cv2
 #import fire
 import numpy as np
 import tensorflow as tf
+from tensorflow.compat.v1 import InteractiveSession
+
 import time
 
 import commons
@@ -29,9 +31,9 @@ _logger.addHandler(ch)
 
 
 class ADNetRunner:
-    MAX_BATCHSIZE = 512
+    MAX_BATCHSIZE = 4
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, verbose=True, load_baseline=False):
         self.tensor_input = tf.placeholder(tf.float32, shape=(None, 112, 112, 3), name='patch')
         self.tensor_action_history = tf.placeholder(tf.float32, shape=(None, 1, 1, 110), name='action_history')
         self.tensor_lb_action = tf.placeholder(tf.int32, shape=(None, ), name='lb_action')
@@ -39,21 +41,38 @@ class ADNetRunner:
         self.tensor_is_training = tf.placeholder(tf.bool, name='is_training')
         self.learning_rate_placeholder = tf.placeholder(tf.float32, [], name='learning_rate')
 
-        self.persistent_sess = tf.Session(config=tf.ConfigProto(
-            inter_op_parallelism_threads=1,
-            intra_op_parallelism_threads=1
-        ))
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        config.inter_op_parallelism_threads=1
+        config.intra_op_parallelism_threads=1
+        gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.3)
+        #self.persistent_sess = tf.Session(config=tf.ConfigProto(
+        #    inter_op_parallelism_threads=1,
+        #    intra_op_parallelism_threads=1
+        #))
+        self.persistent_sess = tf.Session(config=config)
         self.model_path = model_path
+        self.verbose = verbose
         self.adnet = ADNetwork(self.learning_rate_placeholder)
         self.adnet.create_network(self.tensor_input, self.tensor_lb_action, self.tensor_lb_class, self.tensor_action_history, self.tensor_is_training)
-        if os.path.exists(self.model_path):
-            saver = tf.train.Saver()
-            saver.restore(self.persistent_sess, self.model_path)
-        else:
+
+        model_path = os.path.join(self.model_path, 'model.ckpt')
+
+        #load_baseline = True
+        if load_baseline:
+            print('Loading baseline model')
             if 'ADNET_MODEL_PATH' in os.environ.keys():
                 self.adnet.read_original_weights(self.persistent_sess, os.environ['ADNET_MODEL_PATH'])
             else:
                 self.adnet.read_original_weights(self.persistent_sess)
+        elif 0:#os.path.exists(model_path):
+            saver = tf.train.Saver()
+            saver.restore(self.persistent_sess, model_path)
+            print('Loading model from: ', model_path)
+        else:
+            print("Traning Model from scratch")
+            init = tf.global_variables_initializer()
+            self.persistent_sess.run(init)
 
         self.action_histories = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
         self.action_histories_old = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
@@ -70,7 +89,7 @@ class ADNetRunner:
     def get_image_path(self, vid_path, idx):
         im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
         if os.path.exists(im_path):
-            return
+            return im_path
         return os.path.join(vid_path, 'img', '%08d.jpg' % (idx + 1))
 
     def by_dataset(self, vid_path='./data/freeman1/'):
@@ -110,14 +129,24 @@ class ADNetRunner:
         curr_bbox = None
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
+
+        gt_box_tuples = []
         for idx, gt_box in enumerate(gt_boxes):
+            gt_box_tuples.append((idx, gt_box))
+
+        random.shuffle(gt_box_tuples)
+        num_frames = len(gt_box_tuples)
+
+        for i in range(num_frames):
+            idx = gt_box_tuples[i][0]
+            gt_box = gt_box_tuples[i][1]
             im_path = self.get_image_path(vid_path, idx)
-            print('im_path: {}'.format(im_path))
+            #print('{}/{}: im_path: {}'.format(i, num_frames, im_path))
             img = commons.imread(im_path)
             self.imgwh = Coordinate.get_imgwh(img)
             # if idx == 0:
             # initialization : initial fine-tuning
-            self.initial_finetune(img, gt_box)
+            self.finetune_all(img, gt_box)
             # curr_bbox = gt_box
 
             # tracking
@@ -178,8 +207,36 @@ class ADNetRunner:
         )
 
         self.histories.append((pos_boxes, neg_boxes, pos_lb_action, np.copy(img), self.iteration))
-        _logger.info('ADNetRunner.initial_finetune t=%.3f' % t)
+        #_logger.info('ADNetRunner.initial_finetune t=%.3f' % t)
         self.stopwatch.stop('initial_finetune')
+
+    def finetune_all(self, img, detection_box):
+        self.stopwatch.start('finetune_all')
+        t = time.time()
+
+        # generate samples
+        pos_num, neg_num = ADNetConf.g()['finetune']['pos_num'], ADNetConf.g()['finetune']['neg_num']
+        pos_boxes, neg_boxes = detection_box.get_posneg_samples(self.imgwh, pos_num, neg_num, use_whole=True)
+        pos_lb_action = BoundingBox.get_action_labels(pos_boxes, detection_box)
+
+        feats = self._get_features([commons.extract_region(img, box) for i, box in enumerate(pos_boxes)])
+        for box, feat in zip(pos_boxes, feats):
+            box.feat = feat
+        feats = self._get_features([commons.extract_region(img, box) for i, box in enumerate(neg_boxes)])
+        for box, feat in zip(neg_boxes, feats):
+            box.feat = feat
+
+        # train_fc_finetune_hem
+        self._finetune_fc(
+            img, pos_boxes, neg_boxes, pos_lb_action,
+            ADNetConf.get()['finetune']['learning_rate'],
+            ADNetConf.get()['finetune']['iter']
+        )
+
+        self.histories.append((pos_boxes, neg_boxes, pos_lb_action, np.copy(img), self.iteration))
+        #_logger.info('ADNetRunner.finetune_all t=%.3f' % t)
+        self.stopwatch.stop('finetune_all')
+
 
     def _finetune_fc(self, img, pos_boxes, neg_boxes, pos_lb_action, learning_rate, iter, iter_score=1):
         BATCHSIZE = ADNetConf.g()['minibatch_size']
@@ -193,9 +250,10 @@ class ADNetRunner:
         neg_samples = [commons.extract_region(get_img(i, 1), box) for i, box in enumerate(neg_boxes)]
         # pos_feats, neg_feats = self._get_features(pos_samples), self._get_features(neg_samples)
 
-        commons.imshow_grid('pos', pos_samples[-50:], 10, 5)
-        commons.imshow_grid('neg', neg_samples[-50:], 10, 5)
-        cv2.waitKey(1)
+        if self.verbose:
+            commons.imshow_grid('pos', pos_samples[-50:], 10, 5)
+            commons.imshow_grid('neg', neg_samples[-50:], 10, 5)
+            cv2.waitKey(1)
 
         for i in range(iter):
             batch_idxs = commons.random_idxs(len(pos_boxes), BATCHSIZE)
@@ -353,7 +411,7 @@ class ADNetRunner:
                 ADNetConf.get()['finetune']['learning_rate'],
                 ADNetConf.get()['finetune']['iter']
             )
-            _logger.debug('finetuned')
+            #_logger.debug('finetuned')
             self.stopwatch.stop('tracking.online_finetune')
 
         cv2.imshow('patch', patch)
@@ -361,19 +419,21 @@ class ADNetRunner:
 
     def save_model(self):
         saver = tf.train.Saver()
+        model_path = os.path.join(self.model_path, 'model.ckpt')
         if os.path.exists(self.model_path):
-            save_path = saver.save(self.persistent_sess, self.model_path)
+            save_path = saver.save(self.persistent_sess, model_path)
             print("Saving model at: ", save_path)
         else:
-            print('model path does not exist: ', self.model_path)
+            print('model path does not exist: ', model_path)
 
     def load_model(self):
         saver = tf.train.Saver()
+        model_path = os.path.join(self.model_path, 'model.ckpt')
         if os.path.exists(self.model_path):
-            saver.restore(self.persistent_sess, self.model_path)
-            print("Loading model at: ", self.model_path)
+            saver.restore(self.persistent_sess, model_path)
+            print("Loading model at: ", model_path)
         else:
-            print('model path does not exist: ', self.model_path)
+            print('model path does not exist: ', model_path)
 
 
     def redetection_by_sampling(self, prev_box, img):
@@ -409,9 +469,22 @@ class ADNetRunner:
     def __del__(self):
         self.persistent_sess.close()
 
+def str2bool(v):
+    if isinstance(v, bool):
+       return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-vid_path", type=str, default='./data/freeman1')
+    parser.add_argument("-debug", type=str2bool, nargs= '?', default=True)
+    parser.add_argument("-mode", type=str, default='test')
+    parser.add_argument("-verbose", type=str2bool, nargs='?', default=False)
     args = parser.parse_args()
 
     current_dir = '.'
@@ -429,18 +502,56 @@ if __name__ == '__main__':
     #fire.Fire(ADNetRunner)
 
     vid_path = args.vid_path
-    model = ADNetRunner()
-    model.train(vid_path=vid_path)
+    model_path = 'checkpoints'
+    verbose = args.verbose
+    mode = args.mode
+    debug = args.debug
+    model = ADNetRunner(model_path=model_path, verbose=verbose)
 
+    if debug:
+        if mode == 'train':
+            print('Training with debug mode')
+            model.train(vid_path=vid_path)
+        else:
+            print('Testing with debug mode')
+            model.by_dataset(vid_path=vid_path)
+        exit(1)
 
-    model_path = 'model.ckpt'
-    print('Saving the model')
-    # TODO
-    # model.save_model(model_path)
+    if mode == 'train':
+        folders = ['vot2013', 'vot2014', 'vot2015']
+        all_paths = []
+        for folder in folders:
+            train_dir = os.path.join('train_data', folder)
+            for subdir, dirs, files in os.walk(train_dir, topdown=True):
+                for name in dirs:
+                    if name[-3:] != 'img':
+                        print(os.path.join(subdir, name))
+                        all_paths.append(os.path.join(subdir, name))
 
-    print('Loading the model')
-    # TODO
-    # model.load_model(model_path)
+        num_videos = len(all_paths)
+        print("Number folders: ", num_videos)
 
-    print("=====================Running Inference==================")
-    model.by_dataset(vid_path=vid_path)
+        t1 = time.time()
+        cnt = 0
+        num_files_done = 7
+
+        num_epochs = 30
+        for epoch in range(1, num_epochs + 1):
+            print("Training Epoch: {}/{}".format(epoch, num_epochs))
+            for folder in all_paths:
+                cnt += 1
+                #if 'gym' in folder:
+                #    continue
+                #if cnt < num_files_done + 1:
+                #    continue
+                print("video num: {}/{}".format(cnt, num_videos))
+                model.train(vid_path=folder)
+
+                with open('log.txt', 'w+') as f:
+                    f.write('writting file ' + str(epoch) + ', folder:' + folder)
+                    f.flush()
+
+        print("Total Time Taken in Training: ", time.time() - t1)
+    else:
+        print("=====================Running Inference==================")
+        model.by_dataset(vid_path=vid_path)

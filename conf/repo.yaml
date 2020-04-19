@@ -1,4 +1,4 @@
-minibatch_size: 64
+minibatch_size: 4
 
 initial_finetune:
   pos_thresh: 0.7
