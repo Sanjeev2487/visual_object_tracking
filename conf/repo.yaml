@@ -45,3 +45,4 @@ rl_episode:
   stop_iou: 0.93
   num_action_history: 10
   num_action_step_max: 20
+  lr: 0.0003

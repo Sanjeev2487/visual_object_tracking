@@ -335,29 +335,106 @@ class ADNetRunner:
             action_labels = []
             one_hots = []
             for frame_num in range(startFrames[i], endFrames[i]):  # for each frame in the seq of clips
-                im_path = self.get_image_path(vid_path, gt_box_tuples[frame_num][0])
+                img_index = gt_box_tuples[frame_num][0]
+                im_path = self.get_image_path(vid_path, img_index)
                 img = commons.imread(im_path)
                 self.imgwh = Coordinate.get_imgwh(img)
                 curr_gt_bbox = gt_box_tuples[frame_num][1]
                 ##TODO: if black n white photo append to create 3 channel image
                 curr_bbox, boxes, actions_seq, onehot_seq = self.tracking4training(img, curr_gt_bbox)
-                img_boxes.append(boxes)
+                img_boxes.append([(img_index, box) for box in boxes])
                 one_hots.append(onehot_seq)
                 action_labels.append(actions_seq)
 
             if curr_gt_bbox.iou(curr_bbox)>0.7:
                 ##append to pos data
                 onehots_pos.append(one_hots)
-                imgs_pos.append(onehot_seq)
+                imgs_pos.append(img_boxes)
                 action_labels_pos.append(action_labels)
 
             else:
                 ## append to neg data
                 onehots_neg.append(one_hots)
-                imgs_neg.append(onehot_seq)
+                imgs_neg.append(img_boxes)
                 action_labels_neg.append(action_labels)
 
         ## Policy Gradient Training
+        num_pos = len(action_labels_pos)
+        num_neg = len(action_labels_neg)
+        train_pos_cnt = 0
+        train_pos = []
+        train_neg_cnt = 0
+        train_neg = []
+        batch_size = ADNetConf.get()['rl_episode']['batch_size']
+        if num_pos>batch_size/2:
+            remain = batch_size*numOfClips
+            while(remain>0):
+                if train_pos_cnt==0:
+                    train_pos_list = range(num_pos)
+                    random.shuffle(train_pos_list)
+
+                train_pos.append(train_pos_list[train_pos_cnt+1:min(len(train_pos_list), train_pos_cnt + remain)])
+                train_pos_cnt = min(len(train_pos_list), train_pos_cnt + remain)
+                train_pos_cnt = train_pos_cnt%len(train_pos_list)
+                remain = batch_size*numOfClips - len(train_pos)
+
+        if num_neg>batch_size/2:
+            remain = batch_size*numOfClips
+            while(remain>0):
+                if train_neg_cnt==0:
+                    train_neg_list = range(num_neg)
+                    random.shuffle(train_neg_list)
+
+                train_neg.append(train_neg_list[train_neg_cnt+1:min(len(train_neg_list), train_neg_cnt + remain)])
+                train_neg_cnt = min(len(train_neg_list), train_neg_cnt + remain)
+                train_neg_cnt = train_neg_cnt%len(train_neg_list)
+                remain = batch_size*numOfClips - len(train_neg)
+
+        ## training
+        for batch_idx in range(numOfClips):
+            if train_pos!=[]:
+                pos_examples = train_pos[batch_idx*batch_size:(batch_idx+1)*batch_size]
+                imgs_patches = []
+                for i, pos_ex_index in enumerate(pos_examples):
+                    img = commons.imread(self.get_image_path(vid_path, imgs_pos[pos_ex_index][0]))
+                    imgs_patches.append(commons.extract_region(img, imgs_pos[pos_ex_index][1]))
+
+                imgs_patches_feat = self._get_features(imgs_patches)
+                action_labels = action_labels_pos[pos_examples]
+                action_histories = onehots_pos[pos_examples]
+                self.persistent_sess.run(
+                    self.adnet.weighted_grads_rl,
+                    feed_dict={
+                        self.adnet.layer_feat: imgs_patches_feat,
+                        self.adnet.label_tensor: action_labels,
+                        self.adnet.reward: [1]*len(action_labels),
+                        self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
+                        self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
+                        self.tensor_is_training: True
+                    }
+                )
+
+            if train_neg!=[]:
+                neg_examples = train_neg[batch_idx*batch_size:(batch_idx+1)*batch_size]
+                imgs_patches = []
+                for i, neg_ex_index in enumerate(neg_examples):
+                    img = commons.imread(self.get_image_path(vid_path, imgs_neg[neg_ex_index][0]))
+                    imgs_patches.append(commons.extract_region(img, imgs_neg[neg_ex_index][1]))
+
+                imgs_patches_feat = self._get_features(imgs_patches)
+                action_labels = action_labels_neg[neg_examples]
+                action_histories = onehots_neg[neg_examples]
+                self.persistent_sess.run(
+                    self.adnet.weighted_grads_rl,
+                    feed_dict={
+                        self.adnet.layer_feat: imgs_patches_feat,
+                        self.adnet.label_tensor: action_labels,
+                        self.adnet.reward: [-1]*len(action_labels),
+                        self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
+                        self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
+                        self.tensor_is_training: True
+                    }
+                )
 
 
     def tracking4training(self, img, curr_bbox):
