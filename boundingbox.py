@@ -113,10 +113,14 @@ class BoundingBox:
             if len(coordinates) == 4:
                 x, y, w, h = [int(x) for x in coordinates]
             else:
-                x = int(sum([coordinates[i] for i in [0, 2, 4, 6]])/4)
-                y = int(sum([coordinates[i] for i in [1, 3, 5, 7]])/4)
-                w = int(coordinates[2] - coordinates[0])
-                h = int(coordinates[7] - coordinates[1])
+                xc = [coordinates[i] for i in [0, 2, 4, 6]]
+                yc = [coordinates[i] for i in [1, 3, 5, 7]]
+
+                x = int(min(xc))
+                y = int(min(yc))
+                w = int(max(xc) - min(xc))
+                h = int(max(yc) - min(yc))
+            #print('c : {}, {}, {}, {}'.format(x, y, w, h))
             box = BoundingBox(x, y, w, h)
             boxes.append(box)
         return boxes
@@ -274,14 +278,17 @@ class BoundingBox:
 
         samples = []
         if noise_type == 'whole':
+            #print('{}, {}, {}, {}'.format(imgwh.x, imgwh.y, self.wh.x, self.wh.y))
             grid_x = range(self.wh.x // 2, imgwh.x - self.wh.x // 2, self.wh.x // 5)
             grid_y = range(self.wh.y // 2, imgwh.y - self.wh.y // 2, self.wh.y // 5)
             samples_tmp = []
+            #print(grid_x, ":", grid_y)
             for dx, dy, ds in itertools.product(grid_x, grid_y, range(-5, 5, 1)):
                 box = BoundingBox(dx, dy, self.wh.x*(1.05**ds), self.wh.y*(1.05**ds))
                 box.fit_image(imgwh)
                 samples_tmp.append(box)
 
+            #print('len samples_temp: ', len(samples_tmp))
             for _ in range(num):
                 samples.append(random.choice(samples_tmp))
         else:
@@ -309,7 +316,10 @@ class BoundingBox:
         neg_thresh = kwargs.get('neg_thresh', ADNetConf.g()['initial_finetune']['neg_thresh'])
 
         gaussian_samples = self.gen_noise_samples(imgwh, 'gaussian', pos_size * 2, kwargs=kwargs)
+        #print('len g samples: ', len(gaussian_samples))
+
         gaussian_samples = [x for x in gaussian_samples if x.iou(self) > pos_thresh]
+        #print('len g_ samples: ', len(gaussian_samples))
 
         uniform_samples = self.gen_noise_samples(imgwh, 'uniform', neg_size if use_whole else neg_size*2, kwargs=kwargs)
         uniform_samples = [x for x in uniform_samples if x.iou(self) < neg_thresh]

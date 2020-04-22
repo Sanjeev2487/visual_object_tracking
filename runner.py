@@ -216,6 +216,10 @@ class ADNetRunner:
 
         # generate samples
         pos_num, neg_num = ADNetConf.g()['finetune']['pos_num'], ADNetConf.g()['finetune']['neg_num']
+
+
+        #print('img.shape: ', img.shape)
+        #print('gt_box: {}, {}, {}, {}'.format(detection_box.xy.x, detection_box.xy.y, detection_box.wh.x, detection_box.wh.y))
         pos_boxes, neg_boxes = detection_box.get_posneg_samples(self.imgwh, pos_num, neg_num, use_whole=True)
         pos_lb_action = BoundingBox.get_action_labels(pos_boxes, detection_box)
 
@@ -339,7 +343,9 @@ class ADNetRunner:
                     print('action idx', action_idx)
                     print(prev_bbox)
                     print(curr_bbox)
-                    raise Exception('box not moved.')
+                    print('box not moved.')
+                    #raise Exception('box not moved.')
+                    continue
 
             # oscillation check
             if action_idx != ADNetwork.ACTION_IDX_STOP and curr_bbox in boxes:
@@ -525,7 +531,7 @@ if __name__ == '__main__':
             for subdir, dirs, files in os.walk(train_dir, topdown=True):
                 for name in dirs:
                     if name[-3:] != 'img':
-                        print(os.path.join(subdir, name))
+                        #print(os.path.join(subdir, name))
                         all_paths.append(os.path.join(subdir, name))
 
         num_videos = len(all_paths)
@@ -533,22 +539,26 @@ if __name__ == '__main__':
 
         t1 = time.time()
         cnt = 0
-        num_files_done = 7
+        num_files_done = 84
 
         num_epochs = 30
+
+        for i, folder in enumerate(all_paths, 1):
+            print(i, folder)
+        #exit(1)
         for epoch in range(1, num_epochs + 1):
             print("Training Epoch: {}/{}".format(epoch, num_epochs))
-            for folder in all_paths:
+            for i, folder in enumerate(all_paths, 1):
                 cnt += 1
                 #if 'gym' in folder:
                 #    continue
-                #if cnt < num_files_done + 1:
-                #    continue
-                print("video num: {}/{}".format(cnt, num_videos))
+                if cnt < num_files_done + 1:
+                    continue
+                print("video num: {}/{}, {}".format(cnt, num_videos, folder))
                 model.train(vid_path=folder)
 
                 with open('log.txt', 'w+') as f:
-                    f.write('writting file ' + str(epoch) + ', folder:' + folder)
+                    f.write('writting file epch: {}, folder num: {}, folder: {}'.format(str(epoch), i , folder))
                     f.flush()
 
         print("Total Time Taken in Training: ", time.time() - t1)
