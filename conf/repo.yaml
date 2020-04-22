@@ -35,3 +35,14 @@ predict:
   stop_iou: 0.93
   thresh_fail: 0.50
   thresh_success: 0.50
+
+rl_episode:
+  frame_steps: 10
+  epochs: 1
+  batch_size: 4
+  num_frames_per_video: 5
+  num_action: 11
+  stop_iou: 0.93
+  num_action_history: 10
+  num_action_step_max: 20
+  lr: 0.0003

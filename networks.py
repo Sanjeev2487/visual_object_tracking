@@ -82,6 +82,7 @@ class ADNetwork:
         self.var_grads_fc2 = None
         self.weighted_grads_op1 = None
         self.weighted_grads_op2 = None
+        self.weighted_grads_rl = None
 
     def read_original_weights(self, tf_session, path='./models/adnet-original/net_rl_weights.mat'):
         """
@@ -117,12 +118,12 @@ class ADNetwork:
 
         return weights
 
-    def create_network(self, input_tensor, label_tensor, class_tensor, action_history_tensor, is_training):
+    def create_network(self, input_tensor, label_tensor, class_tensor, action_history_tensor, is_training, reward):
         self.input_tensor = input_tensor
         self.label_tensor = label_tensor
         self.class_tensor = class_tensor
         self.action_history_tensor = action_history_tensor
-
+        self.reward = reward
         # feature extractor - convolutions
         net = slim.convolution(input_tensor, 96, [7, 7], 2, padding='VALID', scope='conv1',
                                activation_fn=tf.nn.relu)
@@ -193,8 +194,28 @@ class ADNetwork:
             else:
                 raise
 
+        self.loss_rl = self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions)
+        var_fc_rl = [var for var in tf.trainable_variables() if 'fc' in var.name and 'fc6_2' not in var.name]
+        self.var_grads_rl = var_fc_rl
+        gradients_rl = tf.gradients(self.loss_rl, xs=var_fc_rl)  # only finetune on fc1 layers
+        self.weighted_grads_rl = []
+        for var, grad in zip(var_fc_rl, gradients_rl):
+            self.weighted_grads_rl.append(10 * grad)
+            continue
+            if 'fc6_1/weights' in var.name:
+                self.weighted_grads_rl.append(20 * grad)
+            elif 'fc6_1/biases' in var.name:
+                self.weighted_grads_rl.append(40 * grad)
+            elif 'weights' in var.name:
+                self.weighted_grads_rl.append(20 * grad)
+            elif 'biases' in var.name:
+                self.weighted_grads_rl.append(10 * grad)
+            else:
+                raise
+
         self.weighted_grads_op1 = self.optimizer.apply_gradients(zip(self.weighted_grads_fc1, self.var_grads_fc1))
         self.weighted_grads_op2 = self.optimizer.apply_gradients(zip(self.weighted_grads_fc2, self.var_grads_fc2))
+        self.weighted_grads_rl = self.optimizer.apply_gradients(zip(self.weighted_grads_rl, self.var_grads_rl))
 
 
 def flatten_convolution(tensor_in):

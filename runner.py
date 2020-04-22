@@ -304,6 +304,279 @@ class ADNetRunner:
                     }
                 )
 
+    def train_rl_tracking(self, vid_path='./data/freeman1/'):
+        ## TODO: Reset action history for each video
+        assert os.path.exists(vid_path)
+
+        gt_boxes = BoundingBox.read_vid_gt(vid_path)
+
+        curr_bbox = None
+        self.stopwatch.start('total')
+        _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
+
+        gt_box_tuples = []
+        for idx, gt_box in enumerate(gt_boxes):
+            gt_box_tuples.append((idx, gt_box))
+
+        # random.shuffle(gt_box_tuples)
+        num_frames = len(gt_box_tuples)
+        startFrames = range(num_frames) - ADNetConf.get()['rl_episode']['frame_steps']  ## check if number of frames are sufficient
+        endFrames = [i + ADNetConf.get()['rl_episode']['frame_steps'] for i in startFrames]
+        numOfClips = min(ADNetConf.get()['rl_episode']['num_frames_per_video'], len(startFrames))
+        randomIndex = range(len(startFrames))
+        random.shuffle(randomIndex)
+        startFrames = startFrames[randomIndex]
+        endFrames = endFrames[randomIndex]
+
+        onehots_pos = []
+        onehots_neg = []
+        imgs_pos = []
+        imgs_neg = []
+        action_labels_pos = []
+        action_labels_neg = []
+        for i in range(numOfClips):
+            img_boxes = []
+            action_labels = []
+            one_hots = []
+            for frame_num in range(startFrames[i], endFrames[i]):  # for each frame in the seq of clips
+                img_index = gt_box_tuples[frame_num][0]
+                im_path = self.get_image_path(vid_path, img_index)
+                img = commons.imread(im_path)
+                self.imgwh = Coordinate.get_imgwh(img)
+                curr_gt_bbox = gt_box_tuples[frame_num][1]
+                ##TODO: if black n white photo append to create 3 channel image
+                curr_bbox, boxes, actions_seq, onehot_seq = self.tracking4training(img, curr_gt_bbox)
+                img_boxes.append([(img_index, box) for box in boxes])
+                one_hots.append(onehot_seq)
+                action_labels.append(actions_seq)
+
+            if curr_gt_bbox.iou(curr_bbox)>0.7:
+                ##append to pos data
+                onehots_pos.append(one_hots)
+                imgs_pos.append(img_boxes)
+                action_labels_pos.append(action_labels)
+
+            else:
+                ## append to neg data
+                onehots_neg.append(one_hots)
+                imgs_neg.append(img_boxes)
+                action_labels_neg.append(action_labels)
+
+        ## Policy Gradient Training
+        num_pos = len(action_labels_pos)
+        num_neg = len(action_labels_neg)
+        train_pos_cnt = 0
+        train_pos = []
+        train_neg_cnt = 0
+        train_neg = []
+        batch_size = ADNetConf.get()['rl_episode']['batch_size']
+        if num_pos>batch_size/2:
+            remain = batch_size*numOfClips
+            while(remain>0):
+                if train_pos_cnt==0:
+                    train_pos_list = range(num_pos)
+                    random.shuffle(train_pos_list)
+
+                train_pos.append(train_pos_list[train_pos_cnt+1:min(len(train_pos_list), train_pos_cnt + remain)])
+                train_pos_cnt = min(len(train_pos_list), train_pos_cnt + remain)
+                train_pos_cnt = train_pos_cnt%len(train_pos_list)
+                remain = batch_size*numOfClips - len(train_pos)
+
+        if num_neg>batch_size/2:
+            remain = batch_size*numOfClips
+            while(remain>0):
+                if train_neg_cnt==0:
+                    train_neg_list = range(num_neg)
+                    random.shuffle(train_neg_list)
+
+                train_neg.append(train_neg_list[train_neg_cnt+1:min(len(train_neg_list), train_neg_cnt + remain)])
+                train_neg_cnt = min(len(train_neg_list), train_neg_cnt + remain)
+                train_neg_cnt = train_neg_cnt%len(train_neg_list)
+                remain = batch_size*numOfClips - len(train_neg)
+
+        ## training
+        for batch_idx in range(numOfClips):
+            if train_pos!=[]:
+                pos_examples = train_pos[batch_idx*batch_size:(batch_idx+1)*batch_size]
+                imgs_patches = []
+                for i, pos_ex_index in enumerate(pos_examples):
+                    img = commons.imread(self.get_image_path(vid_path, imgs_pos[pos_ex_index][0]))
+                    imgs_patches.append(commons.extract_region(img, imgs_pos[pos_ex_index][1]))
+
+                imgs_patches_feat = self._get_features(imgs_patches)
+                action_labels = action_labels_pos[pos_examples]
+                action_histories = onehots_pos[pos_examples]
+                self.persistent_sess.run(
+                    self.adnet.weighted_grads_rl,
+                    feed_dict={
+                        self.adnet.layer_feat: imgs_patches_feat,
+                        self.adnet.label_tensor: action_labels,
+                        self.adnet.reward: [1]*len(action_labels),
+                        self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
+                        self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
+                        self.tensor_is_training: True
+                    }
+                )
+
+            if train_neg!=[]:
+                neg_examples = train_neg[batch_idx*batch_size:(batch_idx+1)*batch_size]
+                imgs_patches = []
+                for i, neg_ex_index in enumerate(neg_examples):
+                    img = commons.imread(self.get_image_path(vid_path, imgs_neg[neg_ex_index][0]))
+                    imgs_patches.append(commons.extract_region(img, imgs_neg[neg_ex_index][1]))
+
+                imgs_patches_feat = self._get_features(imgs_patches)
+                action_labels = action_labels_neg[neg_examples]
+                action_histories = onehots_neg[neg_examples]
+                self.persistent_sess.run(
+                    self.adnet.weighted_grads_rl,
+                    feed_dict={
+                        self.adnet.layer_feat: imgs_patches_feat,
+                        self.adnet.label_tensor: action_labels,
+                        self.adnet.reward: [-1]*len(action_labels),
+                        self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
+                        self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
+                        self.tensor_is_training: True
+                    }
+                )
+
+
+    def tracking4training(self, img, curr_bbox):
+        self.iteration += 1
+        is_tracked = True
+        boxes = []
+        actions_seq = []
+        onehot_seq = np.zeros(len(ADNetConf.get()['rl_episode']['num_action'])*len(ADNetConf.get()['rl_episode']['num_action_history']), len(ADNetConf.get()['rl_episode']['num_action_step_max']))
+        self.latest_score = -1
+        self.stopwatch.start('tracking4training.do_action')
+        track_i = 0
+        for track_i in range(ADNetConf.get()['rl_episode']['num_action']):
+            patch = commons.extract_region(img, curr_bbox)
+
+            # forward with image & action history
+            actions, classes = self.persistent_sess.run(
+                [self.adnet.layer_actions, self.adnet.layer_scores],
+                feed_dict={
+                    self.adnet.input_tensor: [patch],
+                    self.adnet.action_history_tensor: [commons.onehot_flatten(self.action_histories)],
+                    self.tensor_is_training: False
+                }
+            )
+
+            latest_score = classes[0][1]
+            if latest_score < ADNetConf.g()['rl_episode']['thresh_fail']:
+                is_tracked = False
+                self.action_histories_old = np.copy(self.action_histories)
+                self.action_histories = np.insert(self.action_histories, 0, 12)[:-1]
+                break
+            else:
+                self.failed_cnt = 0
+            self.latest_score = latest_score
+
+            # move box
+            onehot_seq[:,track_i] = self.action_history2onehot(onehot_seq.shape[0])
+            action_idx = np.argmax(actions[0])
+            self.action_histories = np.insert(self.action_histories, 0, action_idx)[:-1]
+            prev_bbox = curr_bbox
+            curr_bbox = curr_bbox.do_action(self.imgwh, action_idx)
+            if action_idx != ADNetwork.ACTION_IDX_STOP:
+                if prev_bbox == curr_bbox:
+                    print('action idx', action_idx)
+                    print(prev_bbox)
+                    print(curr_bbox)
+                    raise Exception('box not moved.')
+
+            # oscillation check
+            if action_idx != ADNetwork.ACTION_IDX_STOP and curr_bbox in boxes:
+                action_idx = ADNetwork.ACTION_IDX_STOP
+
+            if action_idx == ADNetwork.ACTION_IDX_STOP:
+                break
+
+            boxes.append(curr_bbox)
+            actions_seq.append(action_idx)
+
+        onehot_seq = onehot_seq[:, :track_i]
+        self.stopwatch.stop('tracking4training.do_action')
+
+        # redetection when tracking failed
+        new_score = 0.0
+        if not is_tracked:
+            self.failed_cnt += 1
+            # run redetection callback function
+            new_box, new_score = self.callback_redetection(curr_bbox, img)
+            if new_box is not None:
+                curr_bbox = new_box
+                patch = commons.extract_region(img, curr_bbox)
+            _logger.debug('redetection success=%s' % (str(new_box is not None)))
+
+        '''
+        # save samples
+        if is_tracked or new_score > ADNetConf.g()['predict']['thresh_success']:
+            self.stopwatch.start('tracking.save_samples.roi')
+            imgwh = Coordinate.get_imgwh(img)
+            pos_num, neg_num = ADNetConf.g()['finetune']['pos_num'], ADNetConf.g()['finetune']['neg_num']
+            pos_boxes, neg_boxes = curr_bbox.get_posneg_samples(
+                imgwh, pos_num, neg_num, use_whole=False,
+                pos_thresh=ADNetConf.g()['finetune']['pos_thresh'],
+                neg_thresh=ADNetConf.g()['finetune']['neg_thresh'],
+                uniform_translation_f=2,
+                uniform_scale_f=5
+            )
+            self.stopwatch.stop('tracking.save_samples.roi')
+            self.stopwatch.start('tracking.save_samples.feat')
+            feats = self._get_features([commons.extract_region(img, box) for i, box in enumerate(pos_boxes)])
+            for box, feat in zip(pos_boxes, feats):
+                box.feat = feat
+            feats = self._get_features([commons.extract_region(img, box) for i, box in enumerate(neg_boxes)])
+            for box, feat in zip(neg_boxes, feats):
+                box.feat = feat
+            pos_lb_action = BoundingBox.get_action_labels(pos_boxes, curr_bbox)
+            self.histories.append((pos_boxes, neg_boxes, pos_lb_action, np.copy(img), self.iteration))
+
+            # clear old ones
+            self.histories = self.histories[-ADNetConf.g()['finetune']['long_term']:]
+            self.stopwatch.stop('tracking.save_samples.feat')
+
+        # online finetune
+        if self.iteration % ADNetConf.g()['finetune']['interval'] == 0 or is_tracked is False:
+            img_pos, img_neg = [], []
+            pos_boxes, neg_boxes, pos_lb_action = [], [], []
+            pos_term = 'long_term' if is_tracked else 'short_term'
+            for i in range(ADNetConf.g()['finetune'][pos_term]):
+                if i >= len(self.histories):
+                    break
+                pos_boxes.extend(self.histories[-(i+1)][0])
+                pos_lb_action.extend(self.histories[-(i+1)][2])
+                img_pos.extend([self.histories[-(i+1)][3]]*len(self.histories[-(i+1)][0]))
+            for i in range(ADNetConf.g()['finetune']['short_term']):
+                if i >= len(self.histories):
+                    break
+                neg_boxes.extend(self.histories[-(i+1)][1])
+                img_neg.extend([self.histories[-(i+1)][3]]*len(self.histories[-(i+1)][1]))
+            self.stopwatch.start('tracking.online_finetune')
+            self._finetune_fc(
+                (img_pos, img_neg), pos_boxes, neg_boxes, pos_lb_action,
+                ADNetConf.get()['finetune']['learning_rate'],
+                ADNetConf.get()['finetune']['iter']
+            )
+            #_logger.debug('finetuned')
+            self.stopwatch.stop('tracking.online_finetune')
+        '''## Online Finetuning
+        cv2.imshow('patch', patch)
+        return curr_bbox, boxes, actions_seq, onehot_seq
+
+
+    def action_history2onehot(self, shape):
+        row = len(ADNetConf.get()['rl_episode']['num_action'])
+        col = len(ADNetConf.get()['rl_episode']['num_action_history'])
+        arr = np.zeros((row,col))
+        for index, action_idx in enumerate(self.action_histories):
+            arr[action_idx, index] = 1
+
+        return arr.flatten()
+
+
     def tracking(self, img, curr_bbox):
         self.iteration += 1
         is_tracked = True
