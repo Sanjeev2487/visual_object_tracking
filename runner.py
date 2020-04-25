@@ -13,6 +13,7 @@ import tensorflow as tf
 from tensorflow.compat.v1 import InteractiveSession
 
 import time
+import math
 
 import commons
 from boundingbox import BoundingBox, Coordinate
@@ -38,6 +39,8 @@ class ADNetRunner:
         self.tensor_action_history = tf.placeholder(tf.float32, shape=(None, 1, 1, 110), name='action_history')
         self.tensor_lb_action = tf.placeholder(tf.int32, shape=(None, ), name='lb_action')
         self.tensor_lb_class = tf.placeholder(tf.int32, shape=(None, ), name='lb_class')
+        self.reward = tf.placeholder(tf.float32, shape=(None, ), name='reward')
+
         self.tensor_is_training = tf.placeholder(tf.bool, name='is_training')
         self.learning_rate_placeholder = tf.placeholder(tf.float32, [], name='learning_rate')
 
@@ -54,25 +57,28 @@ class ADNetRunner:
         self.model_path = model_path
         self.verbose = verbose
         self.adnet = ADNetwork(self.learning_rate_placeholder)
-        self.adnet.create_network(self.tensor_input, self.tensor_lb_action, self.tensor_lb_class, self.tensor_action_history, self.tensor_is_training)
+        self.adnet.create_network(self.tensor_input, self.tensor_lb_action, self.tensor_lb_class, self.tensor_action_history, self.tensor_is_training, self.reward)
 
         model_path = os.path.join(self.model_path, 'model.ckpt')
 
-        #load_baseline = True
+        load_baseline = False
         if load_baseline:
             print('Loading baseline model')
             if 'ADNET_MODEL_PATH' in os.environ.keys():
                 self.adnet.read_original_weights(self.persistent_sess, os.environ['ADNET_MODEL_PATH'])
             else:
                 self.adnet.read_original_weights(self.persistent_sess)
-        elif 0:#os.path.exists(model_path):
+        elif 1:#os.path.exists(model_path):
             saver = tf.train.Saver()
             saver.restore(self.persistent_sess, model_path)
             print('Loading model from: ', model_path)
         else:
             print("Traning Model from scratch")
-            init = tf.global_variables_initializer()
-            self.persistent_sess.run(init)
+            #read_vgg_weights
+            if 'ADNET_MODEL_PATH' in os.environ.keys():
+                self.adnet.read_vgg_weights(self.persistent_sess, os.environ['ADNET_MODEL_PATH'])
+            else:
+                self.adnet.read_vgg_weights(self.persistent_sess)
 
         self.action_histories = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
         self.action_histories_old = np.array([0] * ADNetConf.get()['action_history'], dtype=np.int8)
@@ -85,6 +91,7 @@ class ADNetRunner:
         self.latest_score = 0
 
         self.stopwatch = StopWatchManager()
+        self.loss_logger = open(os.path.join(self.model_path, 'loss.log'), 'a+')
 
     def get_image_path(self, vid_path, idx):
         im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
@@ -215,7 +222,7 @@ class ADNetRunner:
         t = time.time()
 
         # generate samples
-        pos_num, neg_num = ADNetConf.g()['finetune']['pos_num'], ADNetConf.g()['finetune']['neg_num']
+        pos_num, neg_num = ADNetConf.g()['sl_train']['pos_num'], ADNetConf.g()['sl_train']['neg_num']
 
 
         #print('img.shape: ', img.shape)
@@ -233,8 +240,8 @@ class ADNetRunner:
         # train_fc_finetune_hem
         self._finetune_fc(
             img, pos_boxes, neg_boxes, pos_lb_action,
-            ADNetConf.get()['finetune']['learning_rate'],
-            ADNetConf.get()['finetune']['iter']
+            ADNetConf.get()['sl_train']['learning_rate'],
+            ADNetConf.get()['sl_train']['iter']
         )
 
         self.histories.append((pos_boxes, neg_boxes, pos_lb_action, np.copy(img), self.iteration))
@@ -259,12 +266,16 @@ class ADNetRunner:
             commons.imshow_grid('neg', neg_samples[-50:], 10, 5)
             cv2.waitKey(1)
 
+        num_cls = 0
+        num_actions = 0
+        loss_actions = 0.0
+        loss_cls = 0.0
         for i in range(iter):
             batch_idxs = commons.random_idxs(len(pos_boxes), BATCHSIZE)
             batch_feats = [x.feat for x in commons.choices_by_idx(pos_boxes, batch_idxs)]
             batch_lb_action = commons.choices_by_idx(pos_lb_action, batch_idxs)
-            self.persistent_sess.run(
-                self.adnet.weighted_grads_op1,
+            grad_action, loss_actions_ = self.persistent_sess.run(
+                [self.adnet.weighted_grads_op1, self.adnet.loss_actions],
                 feed_dict={
                     self.adnet.layer_feat: batch_feats,
                     self.adnet.label_tensor: batch_lb_action,
@@ -273,6 +284,8 @@ class ADNetRunner:
                     self.tensor_is_training: True
                 }
             )
+            loss_actions += sum(loss_actions_)/BATCHSIZE
+            num_actions += 1
 
             if i % iter_score == 0:
                 # training score auxiliary(fc2)
@@ -293,8 +306,9 @@ class ADNetRunner:
 
                 # -- train
                 batch_feats_neg = [x.feat for x in commons.choices_by_idx(neg_boxes, desc_order_idx[:BATCHSIZE])]
-                self.persistent_sess.run(
-                    self.adnet.weighted_grads_op2,
+                a = batch_feats + batch_feats_neg
+                grads, loss_cls_ = self.persistent_sess.run(
+                    [self.adnet.weighted_grads_op2, self.adnet.loss_cls],
                     feed_dict={
                         self.adnet.layer_feat: batch_feats + batch_feats_neg,
                         self.adnet.class_tensor: [1]*len(batch_feats) + [0]*len(batch_feats_neg),
@@ -303,6 +317,12 @@ class ADNetRunner:
                         self.tensor_is_training: True
                     }
                 )
+                loss_cls += sum(loss_cls_)/BATCHSIZE
+                num_cls += 1
+        s = "loss_actions: {}, Loss cls: {}".format(loss_actions/num_actions, loss_cls/num_cls)
+        #print(s)
+        self.loss_logger.write(s + '\n')
+        self.loss_logger.flush()
 
     def train_rl_tracking(self, vid_path='./data/freeman1/'):
         ## TODO: Reset action history for each video
@@ -320,13 +340,14 @@ class ADNetRunner:
 
         # random.shuffle(gt_box_tuples)
         num_frames = len(gt_box_tuples)
-        startFrames = range(num_frames) - ADNetConf.get()['rl_episode']['frame_steps']  ## check if number of frames are sufficient
-        endFrames = [i + ADNetConf.get()['rl_episode']['frame_steps'] for i in startFrames]
-        numOfClips = min(ADNetConf.get()['rl_episode']['num_frames_per_video'], len(startFrames))
-        randomIndex = range(len(startFrames))
+        num_frame_step = ADNetConf.get()['rl_episode']['frame_steps']
+        startFrames_ = list(range(num_frames - num_frame_step))  ## check if number of frames are sufficient
+        endFrames_ = [i + num_frame_step for i in startFrames_]
+        numOfClips = min(ADNetConf.get()['rl_episode']['num_frames_per_video'], len(startFrames_))
+        randomIndex = list(range(len(startFrames_)))
         random.shuffle(randomIndex)
-        startFrames = startFrames[randomIndex]
-        endFrames = endFrames[randomIndex]
+        startFrames = [startFrames_[i] for i in randomIndex]
+        endFrames = [endFrames_[i] for i in randomIndex] 
 
         onehots_pos = []
         onehots_neg = []
@@ -338,7 +359,7 @@ class ADNetRunner:
             img_boxes = []
             action_labels = []
             one_hots = []
-            for frame_num in range(startFrames[i], endFrames[i]):  # for each frame in the seq of clips
+            for frame_num in range(startFrames[i], endFrames[i] + 1):  # for each frame in the seq of clips
                 img_index = gt_box_tuples[frame_num][0]
                 im_path = self.get_image_path(vid_path, img_index)
                 img = commons.imread(im_path)
@@ -346,25 +367,40 @@ class ADNetRunner:
                 curr_gt_bbox = gt_box_tuples[frame_num][1]
                 ##TODO: if black n white photo append to create 3 channel image
                 curr_bbox, boxes, actions_seq, onehot_seq = self.tracking4training(img, curr_gt_bbox)
-                img_boxes.append([(img_index, box) for box in boxes])
-                one_hots.append(onehot_seq)
-                action_labels.append(actions_seq)
+                #print('boxes: ', boxes)
+                if len(actions_seq) != len(boxes):
+                    print('+++++++++++++++++++++++++++++Mismatch in size: action_seq lentgh: {}, boxes length: {}'.format(len(actions_seq), len(boxes)))
+
+                img_boxes.extend([(img_index, box) for box in boxes])
+                #print('type: onehot_seq', type(onehot_seq))
+                #print('len: onehot_seq', len(onehot_seq))
+                #print('len boxes: ', len(boxes))
+                one_hots.extend(onehot_seq)
+                action_labels.extend(actions_seq)
 
             if curr_gt_bbox.iou(curr_bbox)>0.7:
                 ##append to pos data
-                onehots_pos.append(one_hots)
-                imgs_pos.append(img_boxes)
-                action_labels_pos.append(action_labels)
+                if len(action_labels) != len(img_boxes):
+                    print('====================Mismatch in size: action_labels lentgh: {}, img_boxes length: {}'.format(len(action_labels), len(img_boxes)))
+                onehots_pos.extend(one_hots)
+                imgs_pos.extend(img_boxes)
+                action_labels_pos.extend(action_labels)
 
             else:
                 ## append to neg data
-                onehots_neg.append(one_hots)
-                imgs_neg.append(img_boxes)
-                action_labels_neg.append(action_labels)
+                onehots_neg.extend(one_hots)
+                #print('img_boxes: ', img_boxes)
+                imgs_neg.extend(img_boxes)
+                action_labels_neg.extend(action_labels)
 
         ## Policy Gradient Training
         num_pos = len(action_labels_pos)
         num_neg = len(action_labels_neg)
+
+        #print('len imgs_pos: ', len(imgs_pos))
+        print('num_pos: ', num_pos)
+        #print('len imgs_neg: ', len(imgs_neg))
+        print('num_neg: ', num_neg)
         train_pos_cnt = 0
         train_pos = []
         train_neg_cnt = 0
@@ -374,10 +410,11 @@ class ADNetRunner:
             remain = batch_size*numOfClips
             while(remain>0):
                 if train_pos_cnt==0:
-                    train_pos_list = range(num_pos)
+                    train_pos_list = list(range(num_pos))
+                    #print('Lenght train_pos_list: ', len(train_pos_list))
                     random.shuffle(train_pos_list)
 
-                train_pos.append(train_pos_list[train_pos_cnt+1:min(len(train_pos_list), train_pos_cnt + remain)])
+                train_pos.extend(train_pos_list[train_pos_cnt:min(len(train_pos_list), train_pos_cnt + remain)])
                 train_pos_cnt = min(len(train_pos_list), train_pos_cnt + remain)
                 train_pos_cnt = train_pos_cnt%len(train_pos_list)
                 remain = batch_size*numOfClips - len(train_pos)
@@ -386,73 +423,127 @@ class ADNetRunner:
             remain = batch_size*numOfClips
             while(remain>0):
                 if train_neg_cnt==0:
-                    train_neg_list = range(num_neg)
+                    train_neg_list = list(range(num_neg))
                     random.shuffle(train_neg_list)
 
-                train_neg.append(train_neg_list[train_neg_cnt+1:min(len(train_neg_list), train_neg_cnt + remain)])
+                train_neg.extend(train_neg_list[train_neg_cnt:min(len(train_neg_list), train_neg_cnt + remain)])
                 train_neg_cnt = min(len(train_neg_list), train_neg_cnt + remain)
                 train_neg_cnt = train_neg_cnt%len(train_neg_list)
                 remain = batch_size*numOfClips - len(train_neg)
 
         ## training
+        print('train_pos shape: ', len(train_pos))
+        #print('train_pos[0]: ', train_pos[0])
+        print('train_neg shape: ', len(train_neg))
+        print("numOfClips: ", numOfClips)
+        s = ''
         for batch_idx in range(numOfClips):
             if train_pos!=[]:
                 pos_examples = train_pos[batch_idx*batch_size:(batch_idx+1)*batch_size]
                 imgs_patches = []
                 for i, pos_ex_index in enumerate(pos_examples):
+                    #print("len imgs_pos: ", len(imgs_pos))
+                    #print("imgs_pos[0]: ", imgs_pos[0])
+                    #print('pos_ex_index: ', pos_ex_index)
+                    #print('imgs_pos[pos_ex_index]', imgs_pos[pos_ex_index])
                     img = commons.imread(self.get_image_path(vid_path, imgs_pos[pos_ex_index][0]))
                     imgs_patches.append(commons.extract_region(img, imgs_pos[pos_ex_index][1]))
 
                 imgs_patches_feat = self._get_features(imgs_patches)
-                action_labels = action_labels_pos[pos_examples]
-                action_histories = onehots_pos[pos_examples]
-                self.persistent_sess.run(
-                    self.adnet.weighted_grads_rl,
+                action_labels = [action_labels_pos[i] for i in pos_examples]
+                action_histories = [np.reshape(onehots_pos[i], (-1, 1, 110)) for i in pos_examples]
+                reward = [1]*len(action_labels)
+                grad_rl, loss = self.persistent_sess.run(
+                    [self.adnet.weighted_grads_rl, self.adnet.loss_rl],
                     feed_dict={
                         self.adnet.layer_feat: imgs_patches_feat,
                         self.adnet.label_tensor: action_labels,
-                        self.adnet.reward: [1]*len(action_labels),
+                        self.adnet.reward: reward,
                         self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
                         self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
                         self.tensor_is_training: True
                     }
                 )
+                pos_loss = sum(loss)/batch_size
+                s +=  'pos_loss:{}'.format(pos_loss)
+                #print("Loss Pos: ", sum(loss)/batch_size)
 
             if train_neg!=[]:
                 neg_examples = train_neg[batch_idx*batch_size:(batch_idx+1)*batch_size]
                 imgs_patches = []
                 for i, neg_ex_index in enumerate(neg_examples):
+                    #print(neg_ex_index)
                     img = commons.imread(self.get_image_path(vid_path, imgs_neg[neg_ex_index][0]))
                     imgs_patches.append(commons.extract_region(img, imgs_neg[neg_ex_index][1]))
 
+                #print("type imgs_patches: ", type(imgs_patches))
                 imgs_patches_feat = self._get_features(imgs_patches)
-                action_labels = action_labels_neg[neg_examples]
-                action_histories = onehots_neg[neg_examples]
-                self.persistent_sess.run(
-                    self.adnet.weighted_grads_rl,
+                action_labels = [action_labels_neg[i] for i in neg_examples]
+                action_histories = [np.reshape(onehots_neg[i], (-1, 1, 110)) for i in neg_examples]
+                reward = [-1]*len(action_labels)
+                if False:
+                    print('type imgs_patches_feat: ', type(imgs_patches_feat))
+                    print('type action_labels: ', type(action_labels))
+                    print('type reward: ', type(reward))
+                    print('type action_histories: ', type(action_histories))
+
+                    print('size imgs_patches_feat: ', len(imgs_patches_feat))
+                    print('size action_labels: ', len(action_labels))
+                    print('size reward: ', len(reward))
+                    print('size action_histories: ', len(action_histories))
+
+
+                    print('type imgs_patches_feat[0]: ', type(imgs_patches_feat[0]))
+                    print('type action_labels[0]: ', type(action_labels[0]))
+                    print('type reward[0]: ', type(reward[0]))
+                    print('type action_histories[0]: ', type(action_histories[0]))
+
+                    print('type imgs_patches_feat[0]: ', imgs_patches_feat[0].shape)
+                    print('action_labels[0]: ', action_labels[0])
+                    print('reward[0]: ', reward[0])
+                    print('action_histories[0]: ', action_histories[0])
+                    print('shape action_histories[0]: ', action_histories[0].shape)
+
+
+                grad_rl, loss = self.persistent_sess.run(
+                    [self.adnet.weighted_grads_rl, self.adnet.loss_rl],
                     feed_dict={
                         self.adnet.layer_feat: imgs_patches_feat,
                         self.adnet.label_tensor: action_labels,
-                        self.adnet.reward: [-1]*len(action_labels),
+                        self.adnet.reward: reward,
                         self.adnet.action_history_tensor: action_histories,  ## TODO reshape to np.zeros(shape=(BATCHSIZE, 1, 1, 110))
                         self.learning_rate_placeholder: ADNetConf.get()['rl_episode']['lr'],
                         self.tensor_is_training: True
                     }
                 )
+                neg_loss = sum(loss)/batch_size
+                s += ',neg_loss:{}\n'.format(neg_loss)
+                #print("Loss Neg: ", neg_loss)
+            else:
+                s += '\n'
+        self.loss_logger.write(s)
+        self.loss_logger.flush()
+        self.save_model()
 
 
     def tracking4training(self, img, curr_bbox):
         self.iteration += 1
+        gt = curr_bbox
         is_tracked = True
         boxes = []
         actions_seq = []
-        onehot_seq = np.zeros(len(ADNetConf.get()['rl_episode']['num_action'])*len(ADNetConf.get()['rl_episode']['num_action_history']), len(ADNetConf.get()['rl_episode']['num_action_step_max']))
-        self.latest_score = -1
-        self.stopwatch.start('tracking4training.do_action')
-        track_i = 0
-        for track_i in range(ADNetConf.get()['rl_episode']['num_action']):
-            patch = commons.extract_region(img, curr_bbox)
+        rewards = []
+        num_action = ADNetConf.get()['rl_episode']['num_action']
+        num_action_history = ADNetConf.get()['rl_episode']['num_action_history']
+        num_action_step_max = ADNetConf.get()['rl_episode']['num_action_step_max']
 
+        onehot_seq = []#np.zeros((num_action * num_action_history, num_action_step_max))
+        self.stopwatch.start('tracking4training.do_action')
+        track_i = 1
+        prev_score = -math.inf
+        while track_i <=  num_action_step_max:
+            patch = commons.extract_region(img, curr_bbox)
+            boxes.append(curr_bbox)
             # forward with image & action history
             actions, classes = self.persistent_sess.run(
                 [self.adnet.layer_actions, self.adnet.layer_scores],
@@ -463,19 +554,15 @@ class ADNetRunner:
                 }
             )
 
-            latest_score = classes[0][1]
-            if latest_score < ADNetConf.g()['rl_episode']['thresh_fail']:
-                is_tracked = False
-                self.action_histories_old = np.copy(self.action_histories)
-                self.action_histories = np.insert(self.action_histories, 0, 12)[:-1]
-                break
-            else:
-                self.failed_cnt = 0
-            self.latest_score = latest_score
+            curr_score = classes[0][1] 
+            action_idx = np.argmax(actions[0])
+            if curr_score < ADNetConf.g()['rl_episode']['thresh_fail'] and curr_score < prev_score:
+                if random.uniform(0, 1) < 0.5:
+                    action_idx = random.randint(0,9)
 
             # move box
-            onehot_seq[:,track_i] = self.action_history2onehot(onehot_seq.shape[0])
-            action_idx = np.argmax(actions[0])
+            actions_seq.append(action_idx)
+            onehot_seq.append(self.action_history2onehot())
             self.action_histories = np.insert(self.action_histories, 0, action_idx)[:-1]
             prev_bbox = curr_bbox
             curr_bbox = curr_bbox.do_action(self.imgwh, action_idx)
@@ -490,13 +577,15 @@ class ADNetRunner:
             if action_idx != ADNetwork.ACTION_IDX_STOP and curr_bbox in boxes:
                 action_idx = ADNetwork.ACTION_IDX_STOP
 
+
             if action_idx == ADNetwork.ACTION_IDX_STOP:
                 break
 
-            boxes.append(curr_bbox)
-            actions_seq.append(action_idx)
+            track_i += 1
+            prev_score = curr_score
 
-        onehot_seq = onehot_seq[:, :track_i]
+
+        #onehot_seq = onehot_seq[:, :track_i]
         self.stopwatch.stop('tracking4training.do_action')
 
         # redetection when tracking failed
@@ -563,13 +652,14 @@ class ADNetRunner:
             #_logger.debug('finetuned')
             self.stopwatch.stop('tracking.online_finetune')
         '''## Online Finetuning
-        cv2.imshow('patch', patch)
+        if self.verbose:
+            cv2.imshow('patch', patch)
         return curr_bbox, boxes, actions_seq, onehot_seq
 
 
-    def action_history2onehot(self, shape):
-        row = len(ADNetConf.get()['rl_episode']['num_action'])
-        col = len(ADNetConf.get()['rl_episode']['num_action_history'])
+    def action_history2onehot(self):
+        row = ADNetConf.get()['rl_episode']['num_action']
+        col = ADNetConf.get()['rl_episode']['num_action_history']
         arr = np.zeros((row,col))
         for index, action_idx in enumerate(self.action_histories):
             arr[action_idx, index] = 1
@@ -747,6 +837,7 @@ class ADNetRunner:
 
     def __del__(self):
         self.persistent_sess.close()
+        self.loss_logger.close()
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -761,8 +852,11 @@ def str2bool(v):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("-vid_path", type=str, default='./data/freeman1')
+    parser.add_argument("-model_path", type=str, default='./checkpoint/temp')
     parser.add_argument("-debug", type=str2bool, nargs= '?', default=True)
+    parser.add_argument("-rl", type=str2bool, nargs= '?', default=False)
     parser.add_argument("-mode", type=str, default='test')
+    parser.add_argument("-skip", type=int, default=0)
     parser.add_argument("-verbose", type=str2bool, nargs='?', default=False)
     args = parser.parse_args()
 
@@ -781,16 +875,22 @@ if __name__ == '__main__':
     #fire.Fire(ADNetRunner)
 
     vid_path = args.vid_path
-    model_path = 'checkpoints'
+    model_path = args.model_path
     verbose = args.verbose
     mode = args.mode
     debug = args.debug
+    train_rl = args.rl
     model = ADNetRunner(model_path=model_path, verbose=verbose)
 
     if debug:
         if mode == 'train':
-            print('Training with debug mode')
-            model.train(vid_path=vid_path)
+            if train_rl:
+                print('Training RL with debug mode')
+                for i in range(20):
+                    model.train_rl_tracking(vid_path=vid_path)
+            else:
+                print('Training SL with debug mode')
+                model.train(vid_path=vid_path)
         else:
             print('Testing with debug mode')
             model.by_dataset(vid_path=vid_path)
@@ -812,9 +912,9 @@ if __name__ == '__main__':
 
         t1 = time.time()
         cnt = 0
-        num_files_done = 84
+        num_files_done = args.skip
 
-        num_epochs = 30
+        num_epochs = 1
 
         for i, folder in enumerate(all_paths, 1):
             print(i, folder)
@@ -828,7 +928,10 @@ if __name__ == '__main__':
                 if cnt < num_files_done + 1:
                     continue
                 print("video num: {}/{}, {}".format(cnt, num_videos, folder))
-                model.train(vid_path=folder)
+                if train_rl:
+                    model.train_rl_tracking(vid_path=folder)
+                else:
+                    model.train(vid_path=folder)
 
                 with open('log.txt', 'w+') as f:
                     f.write('writting file epch: {}, folder num: {}, folder: {}'.format(str(epoch), i , folder))

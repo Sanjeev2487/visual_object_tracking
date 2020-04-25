@@ -36,13 +36,25 @@ predict:
   thresh_fail: 0.50
   thresh_success: 0.50
 
+sl_train:
+  interval: 30
+  pos_thresh: 0.7
+  neg_thresh: 0.3
+  long_term: 100
+  short_term: 20
+  pos_num: 30
+  neg_num: 15
+  iter: 10
+  learning_rate: 0.0001
+  
 rl_episode:
   frame_steps: 10
   epochs: 1
-  batch_size: 4
-  num_frames_per_video: 5
+  batch_size: 32
+  num_frames_per_video: 20
   num_action: 11
   stop_iou: 0.93
   num_action_history: 10
   num_action_step_max: 20
   lr: 0.0003
+  thresh_fail: 0.50

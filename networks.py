@@ -71,6 +71,7 @@ class ADNetwork:
         self.layer_feat = None
         self.layer_actions = None
         self.layer_scores = None
+        self.reward = None
 
         self.loss_actions = None
         self.loss_cls = None
@@ -97,6 +98,42 @@ class ADNetwork:
 
         for var in tf.trainable_variables():
             key = var.name.replace('/weights:0', 'f').replace('/biases:0', 'b')
+
+            if key == 'fc6_1b':
+                # add 0.01
+                # reference : https://github.com/hellbell/ADNet/blob/master/adnet_test.m#L39
+                val = np.zeros(var.shape) + 0.01
+            elif key == 'fc6_2b':
+                # all zeros
+                val = np.zeros(var.shape)
+            else:
+                val = weights[key]
+
+                # need to make same shape.
+                val = np.reshape(val, var.shape.as_list())
+
+            tf_session.run(var.assign(val))
+            logger.info('%s : original weights assigned. [0]=%s' % (var.name, str(val[0])[:20]))
+
+        print(tf_session.run(tf.report_uninitialized_variables()))
+
+        return weights
+
+    def read_vgg_weights(self, tf_session, path='./models/adnet-original/net_rl_weights.mat'):
+        """
+        original mat file contains
+        I converted 'net_rl.mat' file to 'net_rl_weights.mat' saving only weights in v7.3 format.
+        """
+        init = tf.global_variables_initializer()
+        tf_session.run(init)
+        logger.info('all global variables initialized')
+
+        weights = hdf5storage.loadmat(path)
+
+        for var in tf.trainable_variables():
+            key = var.name.replace('/weights:0', 'f').replace('/biases:0', 'b')
+            if 'conv' not in key:
+                continue
 
             if key == 'fc6_1b':
                 # add 0.01
