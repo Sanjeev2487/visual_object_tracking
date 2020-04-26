@@ -27,7 +27,7 @@ action_move:
 
 action_history: 10
 redetection:
-  samples: 64 # 256
+  samples: 64 #64 # 256
 
 predict:
   roi_zoom: 1.4
@@ -58,3 +58,5 @@ rl_episode:
   num_action_step_max: 20
   lr: 0.0003
   thresh_fail: 0.50
+  lambda: 5
+  gamma: 0.9
