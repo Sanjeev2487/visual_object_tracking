@@ -619,7 +619,7 @@ class ADNetRunner:
             #a = gt.iou(prev_bbox) - gt.iou(curr_bbox)
             return ADNetConf.get()['rl_episode']['lambda'] * (gt.iou(curr_bbox) - gt.iou(prev_bbox))
 
-    '''
+
     def discount_rewards(self, r, normal):
         """ take a list of size max_dec_step * (batch_size, k) and return a list of the same size """
         if len(r) < 2:
@@ -628,14 +628,14 @@ class ADNetRunner:
         running_add = 0.0
         for t in reversed(range(0, len(r))):
             running_add = running_add * ADNetConf.get()['rl_episode']['gamma'] + r[t] # rd_t = r_t + gamma * r_{t+1}
-            discounted_r[i] = running_add
+            discounted_r[t] = running_add
         
         if normal:
             mean = np.mean(discounted_r)
             std = np.std(discounted_r)
             discounted_r = (discounted_r - mean)/(std)
         return discounted_r.tolist()
-    '''
+
     def tracking4training(self, img, curr_bbox):
         self.iteration += 1
         gt = curr_bbox
@@ -655,18 +655,14 @@ class ADNetRunner:
         while track_i <=  num_action_step_max:
             #print('track_i: ', track_i)
             patch = commons.extract_region(img, curr_bbox)
-            f  = False
             # forward with image & action history
-            print('a: ', patch.shape)
-            print('b: ', commons.onehot_flatten(self.action_histories).shape)
-            print('c: ', )
             
             actions, classes = self.persistent_sess.run(
                 [self.adnet.layer_actions, self.adnet.layer_scores],
                 feed_dict={
                     self.adnet.input_tensor: [patch],
                     self.adnet.action_history_tensor: [commons.onehot_flatten(self.action_histories)],
-                    self.tensor_is_training: f
+                    self.tensor_is_training: False
                 }
             )
 
@@ -686,8 +682,19 @@ class ADNetRunner:
             #action_idx = np.argmax(actions[0])
             # Sample from the policy instead of greedily taking the max probability actions
             probs = actions[0]
-            print('probs: ', probs)
-            action_idx = np.random.choice(np.arange(len(probs)), p=probs) 
+            policy_type = 'eps-greedy'
+            if policy_type == 'greedy':
+                action_idx = np.argmax(probs)
+            elif policy_type == 'sample':
+                action_idx = np.random.choice(np.arange(len(probs)), p=probs)
+            else:
+                epsilon = 0.1
+                policy = np.ones(11, dtype=float) * epsilon / 11
+                max_prob_action = np.argmax(probs)
+                policy[max_prob_action] = 1.0 - epsilon + policy[max_prob_action]
+                action_idx = np.random.choice(np.arange(len(policy)), p=policy)
+                print('probs: ', policy)
+
             curr_bbox_temp = curr_bbox
             curr_bbox = curr_bbox.do_action(self.imgwh, action_idx)
 
@@ -796,7 +803,7 @@ class ADNetRunner:
         '''## Online Finetuning
         if self.verbose:
             cv2.imshow('patch', patch)
-        return curr_bbox, boxes, actions_seq, onehot_seq, rewards
+        return curr_bbox, boxes, actions_seq, onehot_seq, self.discount_rewards(rewards, True)
 
 
     def action_history2onehot(self):
