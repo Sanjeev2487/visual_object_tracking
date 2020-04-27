@@ -207,6 +207,20 @@ class BoundingBox:
         """
         cv2.rectangle(img, tuple(self.xy), tuple(self.get_xy2()), color, 1)
 
+    def get_center_distance(self, other):
+        if isinstance(other, BoundingBox):
+            other_x = other.xy.x
+            other_y = other.xy.y
+            other_w = other.wh.x
+            other_h = other.wh.y
+        else:
+            raise
+
+        xA = max(self.xy.x, other_x)
+        yA = max(self.xy.y, other_y)
+
+        return np.sqrt((xA - other_x)**2 + (yA - other_y)**2)
+        
     def iou(self, other):
         # reference : https://www.pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/
         # determine the (x, y)-coordinates of the intersection rectangle

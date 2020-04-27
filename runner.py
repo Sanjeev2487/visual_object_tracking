@@ -20,6 +20,7 @@ from boundingbox import BoundingBox, Coordinate
 from configs import ADNetConf
 from networks import ADNetwork
 from pystopwatch import StopWatchManager
+import copy
 
 _log_level = logging.DEBUG
 _logger = logging.getLogger('ADNetRunner')
@@ -119,6 +120,7 @@ class ADNetRunner:
 
             # tracking
             predicted_box = self.tracking(img, curr_bbox)
+            print('iou: ', gt_box.iou(predicted_box))
             self.show(img, gt_box=gt_box, predicted_box=predicted_box)
             # cv2.imwrite('/Users/ildoonet/Downloads/aaa/%d.jpg' % self.iteration, img)
             curr_bbox = predicted_box
@@ -178,7 +180,8 @@ class ADNetRunner:
         if predicted_box is not None:
             predicted_box.draw(img, BoundingBox.COLOR_PREDICT)
 
-        cv2.imshow('result', img)
+        scaleUp = cv2.resize(img, None, fx= 0.6*3, fy= 0.6*3, interpolation= cv2.INTER_LINEAR)
+        cv2.imshow('result', scaleUp)
         cv2.waitKey(delay)
 
     def _get_features(self, samples):
@@ -365,15 +368,20 @@ class ADNetRunner:
             action_labels_ = []
             one_hots = []
             reward_episode = []
-            for frame_num in range(startFrames[i], endFrames[i] + 1):  # for each frame in the seq of clips
+            prev_gt_box = None
+            frame_seqs = list(range(startFrames[i], endFrames[i] + 1))
+            for i, frame_num in enumerate(frame_seqs):  # for each frame in the seq of clips
+                if i == len(frame_seqs) - 1:
+                    break
                 img_index = gt_box_tuples[frame_num][0]
                 im_path = self.get_image_path(vid_path, img_index)
                 img = commons.imread(im_path)
                 self.imgwh = Coordinate.get_imgwh(img)
                 curr_gt_bbox = gt_box_tuples[frame_num][1]
+                next_gt_bbox = gt_box_tuples[frame_num+1][1]
                 ##TODO: if black n white photo append to create 3 channel image
                 #print('frame num:', frame_num)
-                curr_bbox, boxes, actions_seq, onehot_seq, reward_ = self.tracking4training(img, curr_gt_bbox)
+                curr_bbox, boxes, actions_seq, onehot_seq, reward_ = self.tracking4training(img, curr_gt_bbox, next_gt_bbox)
                 print('reward: ', reward_)
                 if len(actions_seq) != len(boxes):
                     print('+++++++++++++++++++++++++++++Mismatch in size: action_seq lentgh: {}, boxes length: {}'.format(len(actions_seq), len(boxes)))
@@ -610,14 +618,20 @@ class ADNetRunner:
 
 
     def get_reward(self, action_idx, gt, prev_bbox, curr_bbox):
+        ret_val = 0.0
+        print('curr_iou: {}, prev_iou: {}'.format(gt.iou(curr_bbox), gt.iou(prev_bbox)))
         if action_idx == ADNetwork.ACTION_IDX_STOP:
             if gt.iou(prev_bbox) > 0.7:
-                return 1
+                ret_val = 1
             else:
-                return -1
+                ret_val = -1
         else:
             #a = gt.iou(prev_bbox) - gt.iou(curr_bbox)
-            return ADNetConf.get()['rl_episode']['lambda'] * (gt.iou(curr_bbox) - gt.iou(prev_bbox))
+            ret_val = ADNetConf.get()['rl_episode']['lambda'] * (gt.iou(curr_bbox) - gt.iou(prev_bbox))
+        return ret_val
+        distance_reward = 1 / (gt.get_center_distance(curr_bbox) + 0.01)
+        print('r : {}, d_r: {}'.format(ret_val, distance_reward))
+        return distance_reward + ret_val if ret_val else ret_val
 
 
     def discount_rewards(self, r, normal):
@@ -636,9 +650,8 @@ class ADNetRunner:
             discounted_r = (discounted_r - mean)/(std)
         return discounted_r.tolist()
 
-    def tracking4training(self, img, curr_bbox):
+    def tracking4training(self, img, curr_bbox, gt):
         self.iteration += 1
-        gt = curr_bbox
         prev_bbox = curr_bbox
         is_tracked = True
         boxes = []
@@ -682,18 +695,18 @@ class ADNetRunner:
             #action_idx = np.argmax(actions[0])
             # Sample from the policy instead of greedily taking the max probability actions
             probs = actions[0]
-            policy_type = 'eps-greedy'
+            policy_type = 'sample'
             if policy_type == 'greedy':
                 action_idx = np.argmax(probs)
             elif policy_type == 'sample':
                 action_idx = np.random.choice(np.arange(len(probs)), p=probs)
             else:
-                epsilon = 0.1
+                epsilon = 0.05
                 policy = np.ones(11, dtype=float) * epsilon / 11
                 max_prob_action = np.argmax(probs)
                 policy[max_prob_action] = 1.0 - epsilon + policy[max_prob_action]
                 action_idx = np.random.choice(np.arange(len(policy)), p=policy)
-                print('probs: ', policy)
+            print('probs: ', probs)
 
             curr_bbox_temp = curr_bbox
             curr_bbox = curr_bbox.do_action(self.imgwh, action_idx)
@@ -707,7 +720,7 @@ class ADNetRunner:
                     is_tracked = False
                     #print('2========')
                     break
-            prev_box = curr_bbox_temp
+            prev_bbox = curr_bbox_temp
             # move box
             actions_seq.append(action_idx)
             onehot_seq.append(self.action_history2onehot())
@@ -1071,6 +1084,7 @@ if __name__ == '__main__':
         #exit(1)
         for epoch in range(1, num_epochs + 1):
             print("Training Epoch: {}/{}".format(epoch, num_epochs))
+            cnt = 0
             for i, folder in enumerate(all_paths, 1):
                 cnt += 1
                 #if 'gym' in folder:
