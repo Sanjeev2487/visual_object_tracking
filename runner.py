@@ -652,7 +652,7 @@ class ADNetRunner:
 
     def tracking4training(self, img, curr_bbox, gt):
         self.iteration += 1
-        prev_bbox = curr_bbox
+        prev_bbox = curr_bbox  ##
         is_tracked = True
         boxes = []
         actions_seq = []
@@ -730,7 +730,7 @@ class ADNetRunner:
             # oscillation check
             if action_idx != ADNetwork.ACTION_IDX_STOP and curr_bbox in boxes:
                 action_idx = ADNetwork.ACTION_IDX_STOP
-            boxes.append(curr_bbox)
+            boxes.append(prev_bbox)  ## should append the original box
 
             rewards.append(self.get_reward(action_idx, gt, prev_bbox, curr_bbox))
             if action_idx == ADNetwork.ACTION_IDX_STOP:
@@ -749,12 +749,12 @@ class ADNetRunner:
         if not is_tracked:
             self.failed_cnt += 1
             # run redetection callback function
-            new_box, new_score = self.callback_redetection(curr_bbox, img)
+            new_box, new_score = self.callback_redetection(prev_bbox, img)
             if new_box is not None:
                 curr_bbox = new_box
-                patch = commons.extract_region(img, curr_bbox)
+                # patch = commons.extract_region(img, curr_bbox)
                 action_idx = BoundingBox.get_action_label(gt, curr_bbox)
-                boxes.append(curr_bbox)
+                boxes.append(prev_bbox)
                 actions_seq.append(action_idx)
                 onehot_seq.append(self.action_history2onehot())
                 rewards.append(self.get_reward(action_idx, gt, prev_bbox, curr_bbox))
