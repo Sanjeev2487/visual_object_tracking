@@ -154,6 +154,13 @@ class ADNetwork:
         print(tf_session.run(tf.report_uninitialized_variables()))
 
         return weights
+    def pg_loss(self, reward, label_tensor, out_actions):
+        #self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions)
+        log_prob = tf.log(tf.nn.softmax(out_actions))
+        act_prob = tf.gather(tf.reshape(log_prob, [-1]), label_tensor)
+        tf.logging.info('act_prob:', act_prob)
+        return -tf.reduce_sum(tf.multiply(act_prob, reward))
+                
 
     def create_network(self, input_tensor, label_tensor, class_tensor, action_history_tensor, is_training, reward):
         self.input_tensor = input_tensor
@@ -230,8 +237,8 @@ class ADNetwork:
                 self.weighted_grads_fc2.append(10 * grad)
             else:
                 raise
-
-        self.loss_rl = self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions)
+        #self.loss_rl = self.pg_loss(self.reward, label_tensor, out_actions)
+        self.loss_rl = tf.reduce_mean(self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions))
         var_fc_rl = [var for var in tf.trainable_variables() if 'fc' in var.name and 'fc6_2' not in var.name]
         self.var_grads_rl = var_fc_rl
         gradients_rl = tf.gradients(self.loss_rl, xs=var_fc_rl)  # only finetune on fc1 layers

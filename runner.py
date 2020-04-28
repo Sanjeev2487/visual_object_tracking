@@ -33,7 +33,7 @@ _logger.addHandler(ch)
 
 
 class ADNetRunner:
-    MAX_BATCHSIZE = 4
+    MAX_BATCHSIZE = 512 #original was 512
 
     def __init__(self, model_path, verbose=True, load_baseline=False):
         self.tensor_input = tf.placeholder(tf.float32, shape=(None, 112, 112, 3), name='patch')
@@ -61,6 +61,7 @@ class ADNetRunner:
         self.adnet.create_network(self.tensor_input, self.tensor_lb_action, self.tensor_lb_class, self.tensor_action_history, self.tensor_is_training, self.reward)
 
         model_path = os.path.join(self.model_path, 'model.ckpt')
+        self.epoch = None
 
         load_baseline = False
         if load_baseline:
@@ -93,6 +94,7 @@ class ADNetRunner:
 
         self.stopwatch = StopWatchManager()
         self.loss_logger = open(os.path.join(self.model_path, 'loss.log'), 'a+')
+        self.reward_logger = open(os.path.join(self.model_path, 'reward.log'), 'a+')
 
     def get_image_path(self, vid_path, idx):
         im_path = os.path.join(vid_path, 'img', '%04d.jpg' % (idx + 1))
@@ -108,6 +110,7 @@ class ADNetRunner:
         curr_bbox = None
         self.stopwatch.start('total')
         _logger.info('---- start dataset l=%d' % (len(gt_boxes)))
+        num_success = 0
         for idx, gt_box in enumerate(gt_boxes):
             im_path = self.get_image_path(vid_path, idx)
             print('im_path: {}'.format(im_path))
@@ -120,8 +123,11 @@ class ADNetRunner:
 
             # tracking
             predicted_box = self.tracking(img, curr_bbox)
-            print('iou: ', gt_box.iou(predicted_box))
-            self.show(img, gt_box=gt_box, predicted_box=predicted_box)
+            iou = gt_box.iou(predicted_box)
+            print('iou: ', iou)
+            if iou > ADNetConf.g()['predict']['thresh_success']:
+                num_success += 1
+            self.show(img, frame_num=idx, gt_box=gt_box, predicted_box=predicted_box)
             # cv2.imwrite('/Users/ildoonet/Downloads/aaa/%d.jpg' % self.iteration, img)
             curr_bbox = predicted_box
         self.stopwatch.stop('total')
@@ -129,10 +135,11 @@ class ADNetRunner:
         _logger.info('----')
         _logger.info(self.stopwatch)
         _logger.info('%.3f FPS' % (len(gt_boxes) / self.stopwatch.get_elapsed('total')))
+        print('Precision: %.3f' % ((num_success * 100) / len(gt_boxes)))
 
-    def train(self, vid_path='./data/freeman1/'):
+    def train(self, vid_path='./data/freeman1/', epoch=0):
         assert os.path.exists(vid_path)
-
+        self.epoch = epoch
         gt_boxes = BoundingBox.read_vid_gt(vid_path)
 
         curr_bbox = None
@@ -171,7 +178,7 @@ class ADNetRunner:
         _logger.info(self.stopwatch)
         _logger.info('%.3f FPS' % (len(gt_boxes) / self.stopwatch.get_elapsed('total')))
 
-    def show(self, img, delay=1, predicted_box=None, gt_box=None):
+    def show(self, img, frame_num=None, delay=1, predicted_box=None, gt_box=None):
         if isinstance(img, str):
             img = commons.imread(img)
 
@@ -182,6 +189,7 @@ class ADNetRunner:
 
         scaleUp = cv2.resize(img, None, fx= 0.6*3, fy= 0.6*3, interpolation= cv2.INTER_LINEAR)
         cv2.imshow('result', scaleUp)
+        #cv2.imwrite(os.path.join('img', 'frame' + str(frame_num) + '.jpg'), scaleUp)
         cv2.waitKey(delay)
 
     def _get_features(self, samples):
@@ -322,14 +330,15 @@ class ADNetRunner:
                 )
                 loss_cls += sum(loss_cls_)/BATCHSIZE
                 num_cls += 1
-        s = "loss_actions: {}, Loss cls: {}".format(loss_actions/num_actions, loss_cls/num_cls)
+        s = "epoch: {}, loss_actions: {}, Loss cls: {}".format(self.epoch, loss_actions/num_actions, loss_cls/num_cls)
         #print(s)
         self.loss_logger.write(s + '\n')
         self.loss_logger.flush()
 
-    def train_rl_tracking(self, vid_path='./data/freeman1/'):
+    def train_rl_tracking(self, vid_path='./data/freeman1/', epoch=None):
         ## TODO: Reset action history for each video
         assert os.path.exists(vid_path)
+        self.epoch = epoch
 
         gt_boxes = BoundingBox.read_vid_gt(vid_path)
 
@@ -382,6 +391,10 @@ class ADNetRunner:
                 ##TODO: if black n white photo append to create 3 channel image
                 #print('frame num:', frame_num)
                 curr_bbox, boxes, actions_seq, onehot_seq, reward_ = self.tracking4training(img, curr_gt_bbox, next_gt_bbox)
+                r = sum(reward_)
+                s1 = 'reward:{}'.format(r)
+                self.reward_logger.write(s1 + '\n')
+                self.reward_logger.flush()
                 print('reward: ', reward_)
                 if len(actions_seq) != len(boxes):
                     print('+++++++++++++++++++++++++++++Mismatch in size: action_seq lentgh: {}, boxes length: {}'.format(len(actions_seq), len(boxes)))
@@ -428,7 +441,7 @@ class ADNetRunner:
         print("Number of positive action: {} out of total: {} actions".format(num_pos, num))
         batch_size = ADNetConf.get()['rl_episode']['batch_size']
         indices = list(range(num))
-        random.shuffle(indices)
+        #random.shuffle(indices)
         ## training
         s = ''
         num_batches = int(num/batch_size)
@@ -448,7 +461,7 @@ class ADNetRunner:
                 action_labels_ = [action_labels[i] for i in examples]
                 action_histories = [np.reshape(onehots[i], (-1, 1, 110)) for i in examples]
                 reward = [rewards[i] for i in examples]
-                if False:
+                if True:
                     print('type imgs_patches_feat: ', type(imgs_patches_feat))
                     print('type action_labels: ', type(action_labels))
                     print('type reward: ', type(reward))
@@ -466,7 +479,7 @@ class ADNetRunner:
                     print('type action_histories[0]: ', type(action_histories[0]))
 
                     print('type imgs_patches_feat[0]: ', imgs_patches_feat[0].shape)
-                    print('action_labels[0]: ', action_labels[0])
+                    print('action_labels: ', action_labels)
                     print('reward[0]: ', reward[0])
                     print('action_histories[0]: ', action_histories[0])
                     print('shape action_histories[0]: ', action_histories[0].shape)
@@ -483,9 +496,9 @@ class ADNetRunner:
                         self.tensor_is_training: True
                     }
                 )
-                loss = sum(loss_)/batch_size
-                s = 'loss:{}\n'.format(loss)
-                print("Loss: ", loss)
+                
+                s = 'epoch: {}, loss:{}\n'.format(self.epoch, loss_)
+                print("Loss: ", loss_)
                 self.loss_logger.write(s)
                 self.loss_logger.flush()
         '''
@@ -695,7 +708,7 @@ class ADNetRunner:
             #action_idx = np.argmax(actions[0])
             # Sample from the policy instead of greedily taking the max probability actions
             probs = actions[0]
-            policy_type = 'sample'
+            policy_type = 'greedy'
             if policy_type == 'greedy':
                 action_idx = np.argmax(probs)
             elif policy_type == 'sample':
@@ -1048,12 +1061,14 @@ if __name__ == '__main__':
         if mode == 'train':
             if train_rl:
                 print('Training RL with debug mode')
-                for i in range(50):
+                for i in range(100):
                     print('Training epoch: ', i)
-                    model.train_rl_tracking(vid_path=vid_path)
+                    model.train_rl_tracking(vid_path=vid_path, epoch=i)
             else:
                 print('Training SL with debug mode')
-                model.train(vid_path=vid_path)
+                for i in range(30):
+                    print('Training epoch: ', i)
+                    model.train(vid_path=vid_path, epoch=i)
         else:
             print('Testing with debug mode')
             model.by_dataset(vid_path=vid_path)
@@ -1093,9 +1108,9 @@ if __name__ == '__main__':
                     continue
                 print("epoch: {}, video num: {}/{}, {}".format(epoch, cnt, num_videos, folder))
                 if train_rl:
-                    model.train_rl_tracking(vid_path=folder)
+                    model.train_rl_tracking(vid_path=folder, epoch=i)
                 else:
-                    model.train(vid_path=folder)
+                    model.train(vid_path=folder, epoch=i)
 
                 with open('log.txt', 'w+') as f:
                     f.write('writting file epch: {}, folder num: {}, folder: {}'.format(str(epoch), i , folder))

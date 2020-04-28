@@ -1,4 +1,4 @@
-minibatch_size: 4
+minibatch_size: 64 # original was 64
 
 initial_finetune:
   pos_thresh: 0.7
@@ -45,7 +45,7 @@ sl_train:
   pos_num: 30
   neg_num: 15
   iter: 10
-  learning_rate: 0.0001
+  learning_rate: 0.00001
   
 rl_episode:
   frame_steps: 10
