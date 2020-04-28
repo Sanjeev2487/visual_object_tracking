@@ -87,6 +87,7 @@ class Coordinate:
         self.y = max(self.y, val)
 
 
+
 class BoundingBox:
     COLOR_GT = (0, 255, 0)
     COLOR_PREDICT = (255, 0, 0)
@@ -108,7 +109,18 @@ class BoundingBox:
         for line in lines:
             if not line.strip():
                 continue
-            x, y, w, h = [int(float(x)) for x in line.split(',')]
+            coordinates = [float(x) for x in line.split(',')]
+            if len(coordinates) == 4:
+                x, y, w, h = [int(x) for x in coordinates]
+            else:
+                xc = [coordinates[i] for i in [0, 2, 4, 6]]
+                yc = [coordinates[i] for i in [1, 3, 5, 7]]
+
+                x = int(min(xc))
+                y = int(min(yc))
+                w = int(max(xc) - min(xc))
+                h = int(max(yc) - min(yc))
+            #print('c : {}, {}, {}, {}'.format(x, y, w, h))
             box = BoundingBox(x, y, w, h)
             boxes.append(box)
         return boxes
@@ -181,10 +193,13 @@ class BoundingBox:
         self.xy.x = max(0, self.xy.x)
         self.xy.y = max(0, self.xy.y)
 
+        self.xy.x = min(self.xy.x, imgwh.x)
+        self.xy.y = min(self.xy.y, imgwh.y)
+
         self.wh.x = max(10, min(self.wh.x, imgwh.x - 10))
         self.wh.y = max(10, min(self.wh.y, imgwh.y - 10))
-        self.wh.x = min(self.wh.x, imgwh.x - self.xy.x)
-        self.wh.y = min(self.wh.y, imgwh.y - self.xy.y)
+        self.wh.x = max(10, min(self.wh.x, imgwh.x - self.xy.x))
+        self.wh.y = max(10, min(self.wh.y, imgwh.y - self.xy.y))
 
     def draw(self, img, color=(255, 255, 255)):
         """
@@ -192,6 +207,20 @@ class BoundingBox:
         """
         cv2.rectangle(img, tuple(self.xy), tuple(self.get_xy2()), color, 1)
 
+    def get_center_distance(self, other):
+        if isinstance(other, BoundingBox):
+            other_x = other.xy.x
+            other_y = other.xy.y
+            other_w = other.wh.x
+            other_h = other.wh.y
+        else:
+            raise
+
+        xA = max(self.xy.x, other_x)
+        yA = max(self.xy.y, other_y)
+
+        return np.sqrt((xA - other_x)**2 + (yA - other_y)**2)
+        
     def iou(self, other):
         # reference : https://www.pyimagesearch.com/2016/11/07/intersection-over-union-iou-for-object-detection/
         # determine the (x, y)-coordinates of the intersection rectangle
@@ -263,14 +292,17 @@ class BoundingBox:
 
         samples = []
         if noise_type == 'whole':
+            #print('{}, {}, {}, {}'.format(imgwh.x, imgwh.y, self.wh.x, self.wh.y))
             grid_x = range(self.wh.x // 2, imgwh.x - self.wh.x // 2, self.wh.x // 5)
             grid_y = range(self.wh.y // 2, imgwh.y - self.wh.y // 2, self.wh.y // 5)
             samples_tmp = []
+            #print(grid_x, ":", grid_y)
             for dx, dy, ds in itertools.product(grid_x, grid_y, range(-5, 5, 1)):
                 box = BoundingBox(dx, dy, self.wh.x*(1.05**ds), self.wh.y*(1.05**ds))
                 box.fit_image(imgwh)
                 samples_tmp.append(box)
 
+            #print('len samples_temp: ', len(samples_tmp))
             for _ in range(num):
                 samples.append(random.choice(samples_tmp))
         else:
@@ -298,7 +330,10 @@ class BoundingBox:
         neg_thresh = kwargs.get('neg_thresh', ADNetConf.g()['initial_finetune']['neg_thresh'])
 
         gaussian_samples = self.gen_noise_samples(imgwh, 'gaussian', pos_size * 2, kwargs=kwargs)
+        #print('len g samples: ', len(gaussian_samples))
+
         gaussian_samples = [x for x in gaussian_samples if x.iou(self) > pos_thresh]
+        #print('len g_ samples: ', len(gaussian_samples))
 
         uniform_samples = self.gen_noise_samples(imgwh, 'uniform', neg_size if use_whole else neg_size*2, kwargs=kwargs)
         uniform_samples = [x for x in uniform_samples if x.iou(self) < neg_thresh]

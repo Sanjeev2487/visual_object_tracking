@@ -1,4 +1,4 @@
-minibatch_size: 64
+minibatch_size: 64 # original was 64
 
 initial_finetune:
   pos_thresh: 0.7
@@ -27,7 +27,7 @@ action_move:
 
 action_history: 10
 redetection:
-  samples: 64 # 256
+  samples: 64 #64 # 256
 
 predict:
   roi_zoom: 1.4
@@ -35,3 +35,28 @@ predict:
   stop_iou: 0.93
   thresh_fail: 0.50
   thresh_success: 0.50
+
+sl_train:
+  interval: 30
+  pos_thresh: 0.7
+  neg_thresh: 0.3
+  long_term: 100
+  short_term: 20
+  pos_num: 30
+  neg_num: 15
+  iter: 10
+  learning_rate: 0.00001
+  
+rl_episode:
+  frame_steps: 10
+  epochs: 1
+  batch_size: 32
+  num_frames_per_video: 20
+  num_action: 11
+  stop_iou: 0.93
+  num_action_history: 10
+  num_action_step_max: 20
+  lr: 0.0003
+  thresh_fail: 0.50
+  lambda: 5
+  gamma: 0.9

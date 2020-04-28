@@ -71,6 +71,7 @@ class ADNetwork:
         self.layer_feat = None
         self.layer_actions = None
         self.layer_scores = None
+        self.reward = None
 
         self.loss_actions = None
         self.loss_cls = None
@@ -82,6 +83,7 @@ class ADNetwork:
         self.var_grads_fc2 = None
         self.weighted_grads_op1 = None
         self.weighted_grads_op2 = None
+        self.weighted_grads_rl = None
 
     def read_original_weights(self, tf_session, path='./models/adnet-original/net_rl_weights.mat'):
         """
@@ -117,12 +119,55 @@ class ADNetwork:
 
         return weights
 
-    def create_network(self, input_tensor, label_tensor, class_tensor, action_history_tensor, is_training):
+    def read_vgg_weights(self, tf_session, path='./models/adnet-original/net_rl_weights.mat'):
+        """
+        original mat file contains
+        I converted 'net_rl.mat' file to 'net_rl_weights.mat' saving only weights in v7.3 format.
+        """
+        init = tf.global_variables_initializer()
+        tf_session.run(init)
+        logger.info('all global variables initialized')
+
+        weights = hdf5storage.loadmat(path)
+
+        for var in tf.trainable_variables():
+            key = var.name.replace('/weights:0', 'f').replace('/biases:0', 'b')
+            if 'conv' not in key:
+                continue
+
+            if key == 'fc6_1b':
+                # add 0.01
+                # reference : https://github.com/hellbell/ADNet/blob/master/adnet_test.m#L39
+                val = np.zeros(var.shape) + 0.01
+            elif key == 'fc6_2b':
+                # all zeros
+                val = np.zeros(var.shape)
+            else:
+                val = weights[key]
+
+                # need to make same shape.
+                val = np.reshape(val, var.shape.as_list())
+
+            tf_session.run(var.assign(val))
+            logger.info('%s : original weights assigned. [0]=%s' % (var.name, str(val[0])[:20]))
+
+        print(tf_session.run(tf.report_uninitialized_variables()))
+
+        return weights
+    def pg_loss(self, reward, label_tensor, out_actions):
+        #self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions)
+        log_prob = tf.log(tf.nn.softmax(out_actions))
+        act_prob = tf.gather(tf.reshape(log_prob, [-1]), label_tensor)
+        tf.logging.info('act_prob:', act_prob)
+        return -tf.reduce_sum(tf.multiply(act_prob, reward))
+                
+
+    def create_network(self, input_tensor, label_tensor, class_tensor, action_history_tensor, is_training, reward):
         self.input_tensor = input_tensor
         self.label_tensor = label_tensor
         self.class_tensor = class_tensor
         self.action_history_tensor = action_history_tensor
-
+        self.reward = reward
         # feature extractor - convolutions
         net = slim.convolution(input_tensor, 96, [7, 7], 2, padding='VALID', scope='conv1',
                                activation_fn=tf.nn.relu)
@@ -192,9 +237,29 @@ class ADNetwork:
                 self.weighted_grads_fc2.append(10 * grad)
             else:
                 raise
+        #self.loss_rl = self.pg_loss(self.reward, label_tensor, out_actions)
+        self.loss_rl = tf.reduce_mean(self.reward*tf.nn.sparse_softmax_cross_entropy_with_logits(labels=label_tensor, logits=out_actions))
+        var_fc_rl = [var for var in tf.trainable_variables() if 'fc' in var.name and 'fc6_2' not in var.name]
+        self.var_grads_rl = var_fc_rl
+        gradients_rl = tf.gradients(self.loss_rl, xs=var_fc_rl)  # only finetune on fc1 layers
+        self.weighted_grads_rl = []
+        for var, grad in zip(var_fc_rl, gradients_rl):
+            self.weighted_grads_rl.append(10 * grad)
+            continue
+            if 'fc6_1/weights' in var.name:
+                self.weighted_grads_rl.append(20 * grad)
+            elif 'fc6_1/biases' in var.name:
+                self.weighted_grads_rl.append(40 * grad)
+            elif 'weights' in var.name:
+                self.weighted_grads_rl.append(20 * grad)
+            elif 'biases' in var.name:
+                self.weighted_grads_rl.append(10 * grad)
+            else:
+                raise
 
         self.weighted_grads_op1 = self.optimizer.apply_gradients(zip(self.weighted_grads_fc1, self.var_grads_fc1))
         self.weighted_grads_op2 = self.optimizer.apply_gradients(zip(self.weighted_grads_fc2, self.var_grads_fc2))
+        self.weighted_grads_rl = self.optimizer.apply_gradients(zip(self.weighted_grads_rl, self.var_grads_rl))
 
 
 def flatten_convolution(tensor_in):
